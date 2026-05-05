@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "scheme": "acme",
+    "userInterfaceStyle": "automatic",
+    "orientation": "default",
+    "web": {
+      "output": "static"
+    },
+    "name": "verified-spec-dev-app",
+    "slug": "verified-spec-dev-app",
+    "android": {
+      "package": "com.anonymous.kit_expo_uniwind"
+    },
+    "plugins": ["expo-router"]
+  }
+}
