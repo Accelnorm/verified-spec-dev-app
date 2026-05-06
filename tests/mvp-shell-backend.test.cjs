@@ -2,8 +2,11 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 
 const {
+  approveProjectDesignDoc,
+  approveProjectVerificationProperties,
   applyVibeDefaultsToProject,
   capturePromptToProject,
+  listProjectSummaries,
   sendProjectChatMessage,
   updateProjectWorkflowMode,
 } = require('../.tmp-test-dist/features/mvp-shell/backend.js')
@@ -52,6 +55,9 @@ function projectSnapshotPayload() {
       missing_information: ['Which acceptance checks prove the MVP is ready?'],
       updated_at: '2026-05-06T01:10:00Z',
     },
+    design_doc_approved_at: null,
+    verification_properties: [],
+    verification_properties_approved_at: null,
     suggestions: [
       {
         suggestion_id: 'sug_define_acceptance',
@@ -140,6 +146,41 @@ test('capturePromptToProject sends selected workflow mode', async () => {
   })
 })
 
+test('listProjectSummaries returns route-ready project titles and ids', async () => {
+  global.fetch = async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:8000/projects')
+    assert.equal(options.method, 'GET')
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          projects: [
+            {
+              project_id: 'proj_chat',
+              title: 'Marketplace MVP',
+              workflow_mode: 'vibe_coding',
+              created_at: '2026-05-06T01:00:00Z',
+              updated_at: '2026-05-06T01:10:00Z',
+            },
+          ],
+        }
+      },
+    }
+  }
+
+  const projects = await listProjectSummaries('http://127.0.0.1:8000')
+
+  assert.deepEqual(projects, [
+    {
+      projectId: 'proj_chat',
+      title: 'Marketplace MVP',
+      workflowMode: 'vibe_coding',
+      updatedAt: '2026-05-06T01:10:00Z',
+    },
+  ])
+})
+
 test('updateProjectWorkflowMode persists explicit mode changes through backend API', async () => {
   const fetchCalls = []
   global.fetch = async (url, options) => {
@@ -192,6 +233,77 @@ test('applyVibeDefaultsToProject returns normalized refreshed project state', as
 
   assert.deepEqual(snapshot.state.designDoc.missingInformation, [])
   assert.equal(snapshot.state.designDoc.assumptions.at(-1), 'AI default: use generated tests as acceptance checks.')
+})
+
+test('approveProjectDesignDoc posts approval endpoint and normalizes proposed properties', async () => {
+  global.fetch = async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:8000/projects/proj_chat/design-doc/approve')
+    assert.equal(options.method, 'POST')
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ...projectSnapshotPayload(),
+          design_doc_approved_at: '2026-05-06T02:00:00Z',
+          verification_properties: [
+            {
+              property_id: 'prop_preserve_goal',
+              label: 'Property 01',
+              statement: 'Generation preserves the approved goal.',
+              rationale: 'Backend proposal keeps the proof target explicit.',
+            },
+          ],
+          verification_properties_approved_at: null,
+        }
+      },
+    }
+  }
+
+  const snapshot = await approveProjectDesignDoc({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    projectId: 'proj_chat',
+  })
+
+  assert.equal(snapshot.state.designDocApprovedAt, '2026-05-06T02:00:00Z')
+  assert.equal(snapshot.state.verificationProperties[0].id, 'prop_preserve_goal')
+  assert.equal(snapshot.state.verificationProperties[0].statement, 'Generation preserves the approved goal.')
+  assert.equal(snapshot.state.verificationPropertiesApprovedAt, null)
+})
+
+test('approveProjectVerificationProperties posts approval endpoint and normalizes approval timestamp', async () => {
+  global.fetch = async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:8000/projects/proj_chat/verification-properties/approve')
+    assert.equal(options.method, 'POST')
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ...projectSnapshotPayload(),
+          design_doc_approved_at: '2026-05-06T02:00:00Z',
+          verification_properties: [
+            {
+              id: 'prop_backend_id',
+              label: 'Property 01',
+              statement: 'Generation preserves the approved goal.',
+              rationale: 'Backend proposal keeps the proof target explicit.',
+            },
+          ],
+          verification_properties_approved_at: '2026-05-06T02:05:00Z',
+        }
+      },
+    }
+  }
+
+  const snapshot = await approveProjectVerificationProperties({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    projectId: 'proj_chat',
+  })
+
+  assert.equal(snapshot.state.designDocApprovedAt, '2026-05-06T02:00:00Z')
+  assert.equal(snapshot.state.verificationProperties[0].id, 'prop_backend_id')
+  assert.equal(snapshot.state.verificationPropertiesApprovedAt, '2026-05-06T02:05:00Z')
 })
 
 test('prompt seed normalization ignores later main follow-up messages', async () => {

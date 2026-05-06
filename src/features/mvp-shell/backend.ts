@@ -1,11 +1,15 @@
 import type {
   ChatMessage,
+  DeploymentJobRecord,
+  DeploymentTransactionRequest,
   GenerationArtifactRecord,
   GenerationJobRecord,
   MvpDesignDoc,
   MvpProjectSeed,
+  ProjectRouteSummary,
   MvpShellState,
   Suggestion,
+  VerificationProperty,
   WorkflowMode,
 } from './model'
 
@@ -13,6 +17,9 @@ type BackendProjectSummary = {
   project_id: string
   title: string
   workflow_mode?: WorkflowMode
+  design_doc_approved_at?: string | null
+  verification_properties_approved_at?: string | null
+  published_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -60,8 +67,40 @@ type BackendGenerationJob = {
     path: string
     summary: string
   }[]
+  error?: {
+    code?: string | null
+    message?: string | null
+  } | null
   provider?: string | null
   model?: string | null
+}
+
+type BackendDeploymentTransactionRequest = {
+  request_id: string
+  transaction_base64: string
+  min_context_slot?: string | number | null
+  summary: string
+  simulation_summary?: string | null
+}
+
+export type BackendDeploymentJob = {
+  job_id: string
+  status: string
+  summary: string
+  status_url: string
+  created_at: string
+  updated_at: string
+  cluster?: string
+  source_artifact_id?: string
+  artifact_id?: string
+  payer_wallet?: string | null
+  authority_wallet?: string | null
+  authority_mode?: string | null
+  program_id?: string | null
+  transaction_signatures?: string[]
+  deployment_refs?: string[]
+  verification_status_at_deploy?: string | null
+  signature_request?: BackendDeploymentTransactionRequest | null
 }
 
 type BackendSuggestion = {
@@ -75,12 +114,29 @@ type BackendSuggestion = {
   created_at: string
 }
 
+type BackendVerificationProperty = {
+  property_id?: string
+  id?: string
+  label: string
+  statement: string
+  rationale: string
+}
+
 type BackendProjectSnapshot = {
   project: BackendProjectSummary
   messages: BackendChatMessage[]
   design_doc: BackendDesignDoc | null
+  design_doc_approved_at?: string | null
+  verification_properties?: BackendVerificationProperty[]
+  verification_properties_approved_at?: string | null
+  cvlr_spec_checks_rs?: string | null
+  cvlr_spec_system_doc_txt?: string | null
+  cvlr_spec_generated_at?: string | null
+  cvlr_spec_approved_at?: string | null
+  published_at?: string | null
   suggestions?: BackendSuggestion[]
   latest_job: BackendGenerationJob | null
+  latest_deployment_job?: BackendDeploymentJob | null
 }
 
 type BackendProjectList = {
@@ -100,13 +156,28 @@ export type ProjectSnapshot = {
   state: MvpShellState
 }
 
+export type ProjectSummary = ProjectRouteSummary & {
+  workflowMode: WorkflowMode
+  updatedAt: string
+}
+
 export async function listProjects(backendBaseUrl: string): Promise<string[]> {
+  const projects = await listProjectSummaries(backendBaseUrl)
+  return projects.map((project) => project.projectId)
+}
+
+export async function listProjectSummaries(backendBaseUrl: string): Promise<ProjectSummary[]> {
   const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects`, { method: 'GET' })
   if (!response.ok) {
     throw new Error('Project list is unavailable right now.')
   }
   const payload = (await response.json()) as BackendProjectList
-  return payload.projects.map((project) => project.project_id)
+  return payload.projects.map((project) => ({
+    projectId: project.project_id,
+    title: project.title,
+    workflowMode: normalizeWorkflowMode(project.workflow_mode),
+    updatedAt: project.updated_at,
+  }))
 }
 
 export async function readProjectSnapshot({
@@ -187,14 +258,91 @@ export async function applyVibeDefaultsToProject({
   backendBaseUrl: string
   projectId: string
 }): Promise<ProjectSnapshot> {
-  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/design-doc/apply-vibe-defaults`, {
-    method: 'POST',
-  })
+  const response = await fetch(
+    `${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/design-doc/apply-vibe-defaults`,
+    {
+      method: 'POST',
+    },
+  )
   const payload = (await response.json()) as BackendProjectSnapshot | BackendErrorResponse
   if (!response.ok) {
     throw new Error(readBackendErrorMessage(payload, 'AI defaults are unavailable right now.'))
   }
   return normalizeProjectSnapshot(payload as BackendProjectSnapshot)
+}
+
+export async function approveProjectDesignDoc({
+  backendBaseUrl,
+  projectId,
+}: {
+  backendBaseUrl: string
+  projectId: string
+}): Promise<ProjectSnapshot> {
+  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/design-doc/approve`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new Error('Design Doc approval failed. Try again when the backend is reachable.')
+  }
+  const payload = (await response.json()) as BackendProjectSnapshot
+  return normalizeProjectSnapshot(payload)
+}
+
+export async function approveProjectVerificationProperties({
+  backendBaseUrl,
+  projectId,
+}: {
+  backendBaseUrl: string
+  projectId: string
+}): Promise<ProjectSnapshot> {
+  const response = await fetch(
+    `${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/verification-properties/approve`,
+    {
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    throw new Error('Property approval failed. Try again when the backend is reachable.')
+  }
+  const payload = (await response.json()) as BackendProjectSnapshot
+  return normalizeProjectSnapshot(payload)
+}
+
+export async function approveProjectCvlrSpec({
+  backendBaseUrl,
+  projectId,
+}: {
+  backendBaseUrl: string
+  projectId: string
+}): Promise<ProjectSnapshot> {
+  const response = await fetch(
+    `${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/cvlr-specs/approve`,
+    {
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    throw new Error('CVLR spec approval failed. Try again when the backend is reachable.')
+  }
+  const payload = (await response.json()) as BackendProjectSnapshot
+  return normalizeProjectSnapshot(payload)
+}
+
+export async function publishProject({
+  backendBaseUrl,
+  projectId,
+}: {
+  backendBaseUrl: string
+  projectId: string
+}): Promise<ProjectSnapshot> {
+  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/publish`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new Error('Project publish failed. Try again when the backend is reachable.')
+  }
+  const payload = (await response.json()) as BackendProjectSnapshot
+  return normalizeProjectSnapshot(payload)
 }
 
 export async function sendProjectChatMessage({
@@ -230,9 +378,11 @@ export async function sendProjectChatMessage({
 }
 
 type BackendErrorResponse = {
-  detail?: string | {
-    message?: string
-  }
+  detail?:
+    | string
+    | {
+        message?: string
+      }
 }
 
 export async function saveDesignDocToProject({
@@ -243,7 +393,7 @@ export async function saveDesignDocToProject({
   backendBaseUrl: string
   projectId: string
   designDoc: MvpDesignDoc
-}): Promise<MvpDesignDoc> {
+}): Promise<ProjectSnapshot> {
   const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/design-doc`, {
     method: 'PUT',
     headers: {
@@ -262,12 +412,14 @@ export async function saveDesignDocToProject({
   if (!response.ok) {
     throw new Error('Design Doc save failed. Try again when the backend is reachable.')
   }
-  const payload = (await response.json()) as BackendDesignDoc
-  return normalizeDesignDoc(payload)
+  const payload = (await response.json()) as BackendProjectSnapshot
+  return normalizeProjectSnapshot(payload)
 }
 
 export function deriveLatestPromptSeed(messages: ChatMessage[]): MvpProjectSeed | null {
-  const latestPromptSeedMessage = [...messages].reverse().find((message) => message.side === 'user' && message.source === 'prompt_seed')
+  const latestPromptSeedMessage = [...messages]
+    .reverse()
+    .find((message) => message.side === 'user' && message.source === 'prompt_seed')
   const legacyPromptSeedMessage =
     latestPromptSeedMessage ?? messages.find((message) => message.side === 'user' && message.source !== 'suggestion')
   if (!legacyPromptSeedMessage) {
@@ -300,6 +452,28 @@ export function normalizeGenerationJob(job: BackendGenerationJob): GenerationJob
     artifacts: normalizeArtifacts(job.artifacts),
     providerLabel: job.provider ?? null,
     modelLabel: job.model ?? null,
+    errorMessage: job.error?.message ?? null,
+  }
+}
+
+export function normalizeDeploymentJob(job: BackendDeploymentJob): DeploymentJobRecord {
+  return {
+    jobId: job.job_id,
+    status: job.status,
+    summary: job.summary,
+    statusUrl: job.status_url,
+    createdAt: job.created_at,
+    updatedAt: job.updated_at,
+    cluster: job.cluster ?? 'devnet',
+    sourceArtifactId: job.source_artifact_id ?? job.artifact_id ?? '',
+    payerWallet: job.payer_wallet ?? null,
+    authorityWallet: job.authority_wallet ?? null,
+    authorityMode: job.authority_mode ?? 'user_wallet_demo_authority',
+    programId: job.program_id ?? null,
+    transactionSignatures: job.transaction_signatures ?? [],
+    deploymentRefs: job.deployment_refs ?? [],
+    verificationStatusAtDeploy: job.verification_status_at_deploy ?? null,
+    signatureRequest: normalizeDeploymentSignatureRequest(job.signature_request),
   }
 }
 
@@ -307,8 +481,22 @@ function normalizeProjectSnapshot(payload: BackendProjectSnapshot): ProjectSnaps
   const messages = payload.messages.map(normalizeChatMessage)
   const designDoc = payload.design_doc ? normalizeDesignDoc(payload.design_doc) : null
   const generationJob = payload.latest_job ? normalizeGenerationJob(payload.latest_job) : null
+  const deploymentJob = payload.latest_deployment_job ? normalizeDeploymentJob(payload.latest_deployment_job) : null
   const suggestions = normalizeSuggestions(payload.suggestions)
   const workflowMode = normalizeWorkflowMode(payload.project.workflow_mode)
+  const designDocApprovedAt = payload.design_doc_approved_at ?? payload.project.design_doc_approved_at ?? null
+  const verificationPropertiesApprovedAt =
+    payload.verification_properties_approved_at ?? payload.project.verification_properties_approved_at ?? null
+  const cvlrSpecApprovedAt = payload.cvlr_spec_approved_at ?? null
+  const cvlrSpec =
+    payload.cvlr_spec_checks_rs && payload.cvlr_spec_system_doc_txt && payload.cvlr_spec_generated_at
+      ? {
+          checksRs: payload.cvlr_spec_checks_rs,
+          systemDocTxt: payload.cvlr_spec_system_doc_txt,
+          generatedAt: payload.cvlr_spec_generated_at,
+        }
+      : null
+  const publishedAt = payload.published_at ?? payload.project.published_at ?? null
   return {
     projectId: payload.project.project_id,
     projectTitle: payload.project.title,
@@ -318,12 +506,36 @@ function normalizeProjectSnapshot(payload: BackendProjectSnapshot): ProjectSnaps
       messages,
       latestPromptSeed: deriveLatestPromptSeed(messages),
       designDoc,
-      designDocApprovedAt: null,
-      verificationProperties: [],
-      verificationPropertiesApprovedAt: null,
+      designDocApprovedAt,
+      verificationProperties: normalizeVerificationProperties(payload.verification_properties),
+      verificationPropertiesApprovedAt,
+      cvlrSpec,
+      cvlrSpecApprovedAt,
+      secProReviewRequestedAt: null,
+      publishedAt,
       suggestions,
       generationJob,
+      deploymentJob,
     },
+  }
+}
+
+function normalizeDeploymentSignatureRequest(
+  request: BackendDeploymentTransactionRequest | null | undefined,
+): DeploymentTransactionRequest | null {
+  if (!request) {
+    return null
+  }
+
+  return {
+    requestId: request.request_id,
+    transactionBase64: request.transaction_base64,
+    minContextSlot:
+      request.min_context_slot === undefined || request.min_context_slot === null
+        ? null
+        : String(request.min_context_slot),
+    summary: request.summary,
+    simulationSummary: request.simulation_summary ?? null,
   }
 }
 
@@ -378,9 +590,16 @@ function normalizeSuggestions(suggestions: BackendProjectSnapshot['suggestions']
   }))
 }
 
-function normalizeArtifacts(
-  artifacts: BackendGenerationJob['artifacts']
-): GenerationArtifactRecord[] {
+function normalizeVerificationProperties(properties: BackendProjectSnapshot['verification_properties']): VerificationProperty[] {
+  return (properties ?? []).map((property, index) => ({
+    id: property.property_id ?? property.id ?? `backend-property-${index + 1}`,
+    label: property.label,
+    statement: property.statement,
+    rationale: property.rationale,
+  }))
+}
+
+function normalizeArtifacts(artifacts: BackendGenerationJob['artifacts']): GenerationArtifactRecord[] {
   return (artifacts ?? []).map((artifact) => ({
     artifactId: artifact.artifact_id,
     name: artifact.name,

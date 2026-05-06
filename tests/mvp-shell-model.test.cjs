@@ -3,22 +3,49 @@ const test = require('node:test')
 
 const {
   MVP_CAPTURE_ACK,
-  approveDesignDoc,
-  approveVerificationProperties,
+  createClearedChatState,
   createInitialMvpShellState,
+  DEVNET_DEPLOYMENT_DEMO_WARNING,
+  deriveChatProjectRouteDecision,
+  getDeployableGenerationArtifact,
+  getDeploymentStatusLabel,
+  getDevnetDeploymentBlocker,
   getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
   hasRenderableGenerationResult,
   mergeBackendProjectState,
   restoreMvpShellState,
+  saveDeploymentJob,
   saveGenerationJob,
   serializeMvpShellState,
+  approveCvlrSpec,
+  saveCvlrSpec,
   submitPrompt,
   updateDesignDocField,
   updateDesignDocListField,
   updateWorkflowMode,
 } = require('../.tmp-test-dist/features/mvp-shell/model.js')
+
+function withBackendApprovals(state, options = {}) {
+  return {
+    ...state,
+    designDocApprovedAt: Object.prototype.hasOwnProperty.call(options, 'designDocApprovedAt')
+      ? options.designDocApprovedAt
+      : '2026-05-06T01:06:00Z',
+    verificationProperties: options.verificationProperties ?? [
+      {
+        id: 'prop_backend_1',
+        label: 'Property 01',
+        statement: 'Backend property preserves the approved goal.',
+        rationale: 'The backend proposes proof targets from the persisted project snapshot.',
+      },
+    ],
+    verificationPropertiesApprovedAt: Object.prototype.hasOwnProperty.call(options, 'verificationPropertiesApprovedAt')
+      ? options.verificationPropertiesApprovedAt
+      : '2026-05-06T01:07:00Z',
+  }
+}
 
 test('submitPrompt stores the latest prompt seed and appends a visible confirmation', () => {
   const initialState = createInitialMvpShellState()
@@ -30,28 +57,25 @@ test('submitPrompt stores the latest prompt seed and appends a visible confirmat
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-05T23:59:00Z'
+    '2026-05-05T23:59:00Z',
   )
 
   assert.equal(nextState.latestPromptSeed?.prompt, 'Build a Solana mobile app that turns chat into one MVP design doc.')
   assert.equal(nextState.latestPromptSeed?.updatedAt, '2026-05-05T23:59:00Z')
-  assert.equal(nextState.workflowMode, 'professional_development')
-  assert.deepEqual(
-    nextState.messages.slice(-2),
-    [
-      {
-        id: 'user-1',
-        side: 'user',
-        text: 'Build a Solana mobile app that turns chat into one MVP design doc.',
-        source: 'prompt_seed',
-      },
-      {
-        id: 'app-1',
-        side: 'app',
-        text: MVP_CAPTURE_ACK,
-      },
-    ]
-  )
+  assert.equal(nextState.workflowMode, 'vibe_coding')
+  assert.deepEqual(nextState.messages.slice(-2), [
+    {
+      id: 'user-1',
+      side: 'user',
+      text: 'Build a Solana mobile app that turns chat into one MVP design doc.',
+      source: 'prompt_seed',
+    },
+    {
+      id: 'app-1',
+      side: 'app',
+      text: MVP_CAPTURE_ACK,
+    },
+  ])
 })
 
 test('workflow mode is preserved across prompt submission and serialization', () => {
@@ -63,7 +87,7 @@ test('workflow mode is preserved across prompt submission and serialization', ()
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-06T01:05:00Z'
+    '2026-05-06T01:05:00Z',
   )
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
@@ -80,20 +104,27 @@ test('generation blocker reflects strict Vibe and Pro gates', () => {
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-06T01:05:00Z'
+    '2026-05-06T01:05:00Z',
   )
   const vibeState = updateWorkflowMode(promptState, 'vibe_coding')
-  const readyState = approveVerificationProperties(
-    approveDesignDoc(updateDesignDocListField(vibeState, 'missingInformation', ''), '2026-05-06T01:06:00Z'),
-    '2026-05-06T01:07:00Z'
-  )
+  const readyState = withBackendApprovals(updateDesignDocListField(vibeState, 'missingInformation', ''))
 
-  assert.match(getGenerationBlocker(promptState), /Answer or clear/)
+  assert.match(getGenerationBlocker(promptState), /Use AI defaults/)
   assert.match(getGenerationBlocker(vibeState), /Use AI defaults/)
-  assert.equal(getGenerationBlocker(readyState), null)
+  assert.match(getGenerationBlocker(readyState), /CVLR/)
+
+  const readyWithSpec = saveCvlrSpec(readyState, {
+    checksRs: '#[rule] pub fn rule_cap() {}',
+    systemDocTxt: 'Marketplace MVP',
+    generatedAt: '2026-05-06T01:08:00Z',
+  })
+  assert.match(getGenerationBlocker(readyWithSpec), /Approve the CVLR/)
+
+  const readyWithApprovedSpec = approveCvlrSpec(readyWithSpec, '2026-05-06T01:09:00Z')
+  assert.equal(getGenerationBlocker(readyWithApprovedSpec), null)
 })
 
-test('approving the Design Doc proposes properties before generation can run', () => {
+test('generation readiness is based on backend-restored properties and approval timestamps', () => {
   const promptState = updateDesignDocListField(
     submitPrompt(
       createInitialMvpShellState(),
@@ -102,45 +133,61 @@ test('approving the Design Doc proposes properties before generation can run', (
         const ids = ['user-1', 'app-1']
         return () => ids.shift()
       })(),
-      '2026-05-06T01:05:00Z'
+      '2026-05-06T01:05:00Z',
     ),
     'missingInformation',
-    ''
+    '',
   )
 
   assert.equal(getGenerationBlocker(promptState), 'Approve the Design Doc in Workspace before generation.')
 
-  const designApprovedState = approveDesignDoc(promptState, '2026-05-06T01:06:00Z')
+  const designApprovedState = withBackendApprovals(promptState, {
+    verificationPropertiesApprovedAt: null,
+  })
 
   assert.equal(designApprovedState.designDocApprovedAt, '2026-05-06T01:06:00Z')
-  assert.equal(designApprovedState.verificationProperties.length, 3)
-  assert.equal(getGenerationBlocker(designApprovedState), 'Review and approve the properties to prove before generation.')
+  assert.equal(designApprovedState.verificationProperties.length, 1)
+  assert.equal(
+    getGenerationBlocker(designApprovedState),
+    'Review and approve the properties to prove before generation.',
+  )
 
-  const propertiesApprovedState = approveVerificationProperties(designApprovedState, '2026-05-06T01:07:00Z')
+  const propertiesApprovedState = {
+    ...designApprovedState,
+    verificationPropertiesApprovedAt: '2026-05-06T01:07:00Z',
+  }
 
   assert.equal(propertiesApprovedState.verificationPropertiesApprovedAt, '2026-05-06T01:07:00Z')
-  assert.equal(getGenerationBlocker(propertiesApprovedState), null)
+  assert.equal(getGenerationBlocker(propertiesApprovedState), 'Generate CVLR specs from the approved properties before generation.')
+
+  const withCvlrSpec = saveCvlrSpec(propertiesApprovedState, {
+    checksRs: '#[rule] pub fn rule_cap() {}',
+    systemDocTxt: 'Marketplace MVP',
+    generatedAt: '2026-05-06T01:08:00Z',
+  })
+
+  assert.equal(getGenerationBlocker(withCvlrSpec), 'Approve the CVLR specs before generation.')
+
+  const withApprovedCvlrSpec = approveCvlrSpec(withCvlrSpec, '2026-05-06T01:09:00Z')
+
+  assert.equal(getGenerationBlocker(withApprovedCvlrSpec), null)
 })
 
 test('editing an approved Design Doc resets Design Doc and property approvals', () => {
-  const approvedState = approveVerificationProperties(
-    approveDesignDoc(
-      updateDesignDocListField(
-        submitPrompt(
-          createInitialMvpShellState(),
-          'Build a marketplace MVP.',
-          (() => {
-            const ids = ['user-1', 'app-1']
-            return () => ids.shift()
-          })(),
-          '2026-05-06T01:05:00Z'
-        ),
-        'missingInformation',
-        ''
+  const approvedState = withBackendApprovals(
+    updateDesignDocListField(
+      submitPrompt(
+        createInitialMvpShellState(),
+        'Build a marketplace MVP.',
+        (() => {
+          const ids = ['user-1', 'app-1']
+          return () => ids.shift()
+        })(),
+        '2026-05-06T01:05:00Z',
       ),
-      '2026-05-06T01:06:00Z'
+      'missingInformation',
+      '',
     ),
-    '2026-05-06T01:07:00Z'
   )
 
   const editedState = updateDesignDocField(approvedState, 'goal', 'Refined approved goal.')
@@ -150,7 +197,7 @@ test('editing an approved Design Doc resets Design Doc and property approvals', 
   assert.equal(editedState.verificationPropertiesApprovedAt, null)
 })
 
-test('backend refresh preserves local approvals when the Design Doc has not changed', () => {
+test('backend refresh uses backend approval state instead of preserving local approvals', () => {
   const baseState = updateDesignDocListField(
     submitPrompt(
       createInitialMvpShellState(),
@@ -159,15 +206,12 @@ test('backend refresh preserves local approvals when the Design Doc has not chan
         const ids = ['user-1', 'app-1']
         return () => ids.shift()
       })(),
-      '2026-05-06T01:05:00Z'
+      '2026-05-06T01:05:00Z',
     ),
     'missingInformation',
-    ''
+    '',
   )
-  const localState = approveVerificationProperties(
-    approveDesignDoc(baseState, '2026-05-06T01:06:00Z'),
-    '2026-05-06T01:07:00Z'
-  )
+  const localState = withBackendApprovals(baseState)
   const backendState = {
     ...baseState,
     messages: [...baseState.messages, { id: 'app-2', side: 'app', text: 'Backend reply.' }],
@@ -179,9 +223,9 @@ test('backend refresh preserves local approvals when the Design Doc has not chan
   const mergedState = mergeBackendProjectState(backendState, localState)
 
   assert.equal(mergedState.messages.at(-1)?.text, 'Backend reply.')
-  assert.equal(mergedState.designDocApprovedAt, '2026-05-06T01:06:00Z')
-  assert.equal(mergedState.verificationProperties.length, 3)
-  assert.equal(mergedState.verificationPropertiesApprovedAt, '2026-05-06T01:07:00Z')
+  assert.equal(mergedState.designDocApprovedAt, null)
+  assert.deepEqual(mergedState.verificationProperties, [])
+  assert.equal(mergedState.verificationPropertiesApprovedAt, null)
 })
 
 test('blank prompt does not mutate state', () => {
@@ -189,6 +233,57 @@ test('blank prompt does not mutate state', () => {
   const nextState = submitPrompt(initialState, '   ', () => 'unused', '2026-05-05T23:59:00Z')
 
   assert.equal(nextState, initialState)
+})
+
+test('createClearedChatState resets project artifacts while preserving selected workflow mode', () => {
+  const promptState = updateWorkflowMode(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T01:05:00Z',
+    ),
+    'vibe_coding',
+  )
+
+  const clearedState = createClearedChatState(promptState.workflowMode)
+
+  assert.equal(clearedState.workflowMode, 'vibe_coding')
+  assert.equal(clearedState.latestPromptSeed, null)
+  assert.equal(clearedState.designDoc, null)
+  assert.deepEqual(clearedState.verificationProperties, [])
+  assert.equal(clearedState.messages.length, 1)
+})
+
+test('deriveChatProjectRouteDecision asks for confirmation before reusing a clearly related project', () => {
+  const decision = deriveChatProjectRouteDecision('Add escrow dispute handling to the marketplace MVP.', [
+    { projectId: 'proj_marketplace', title: 'Marketplace MVP' },
+    { projectId: 'proj_records', title: 'Portfolio records' },
+  ])
+
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.project.projectId, 'proj_marketplace')
+})
+
+test('deriveChatProjectRouteDecision asks for confirmation on weaker related prompts', () => {
+  const decision = deriveChatProjectRouteDecision('Add marketplace buyer notifications.', [
+    { projectId: 'proj_marketplace', title: 'Marketplace payments' },
+    { projectId: 'proj_records', title: 'Portfolio records' },
+  ])
+
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.project.projectId, 'proj_marketplace')
+})
+
+test('deriveChatProjectRouteDecision starts new project when no existing project is related', () => {
+  const decision = deriveChatProjectRouteDecision('Build a wallet portfolio analytics app.', [
+    { projectId: 'proj_marketplace', title: 'Marketplace MVP' },
+  ])
+
+  assert.equal(decision.kind, 'new')
 })
 
 test('a later prompt replaces the seed so it survives navigation as the current project prompt', () => {
@@ -199,7 +294,7 @@ test('a later prompt replaces the seed so it survives navigation as the current 
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-05T23:59:00Z'
+    '2026-05-05T23:59:00Z',
   )
 
   const secondState = submitPrompt(
@@ -209,7 +304,7 @@ test('a later prompt replaces the seed so it survives navigation as the current 
       const ids = ['user-2', 'app-2']
       return () => ids.shift()
     })(),
-    '2026-05-06T00:01:00Z'
+    '2026-05-06T00:01:00Z',
   )
 
   assert.equal(secondState.latestPromptSeed?.prompt, 'Second prompt for the actual MVP')
@@ -225,7 +320,7 @@ test('submitPrompt provisions one editable MVP design doc from the latest prompt
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-06T00:30:00Z'
+    '2026-05-06T00:30:00Z',
   )
 
   assert.equal(nextState.designDoc?.title, 'Mobile escrow app MVP')
@@ -244,10 +339,10 @@ test('updateDesignDocField keeps user edits across serialization and restore', (
         const ids = ['user-1', 'app-1']
         return () => ids.shift()
       })(),
-      '2026-05-06T00:30:00Z'
+      '2026-05-06T00:30:00Z',
     ),
     'goal',
-    'Deliver one editable MVP design doc before generation starts.'
+    'Deliver one editable MVP design doc before generation starts.',
   )
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
@@ -267,13 +362,13 @@ test('restoreMvpShellState backfills one MVP design doc for legacy saved prompt-
         prompt: 'Build a mobile escrow app for a hackathon demo.',
         updatedAt: '2026-05-06T00:40:00Z',
       },
-    })
+    }),
   )
 
   assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
   assert.match(restoredState?.designDoc?.goal ?? '', /hackathon-ready/i)
   assert.deepEqual(restoredState?.suggestions, [])
-  assert.equal(restoredState?.workflowMode, 'professional_development')
+  assert.equal(restoredState?.workflowMode, 'vibe_coding')
 })
 
 test('serialized shell state can be restored after a relaunch without losing the latest prompt seed', () => {
@@ -284,7 +379,7 @@ test('serialized shell state can be restored after a relaunch without losing the
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-06T00:10:00Z'
+    '2026-05-06T00:10:00Z',
   )
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
@@ -301,7 +396,7 @@ test('serialized shell state preserves generated suggestions', () => {
         const ids = ['user-1', 'app-1']
         return () => ids.shift()
       })(),
-      '2026-05-06T00:10:00Z'
+      '2026-05-06T00:10:00Z',
     ),
     suggestions: [
       {
@@ -327,7 +422,7 @@ test('restoreMvpShellState rejects malformed stored payloads', () => {
     JSON.stringify({
       messages: [{ id: 'bad-1', side: 'system', text: 'nope' }],
       latestPromptSeed: { prompt: 'Broken', updatedAt: 123 },
-    })
+    }),
   )
 
   assert.equal(restoredState, null)
@@ -341,7 +436,7 @@ test('saveGenerationJob preserves the stable backend job id across serialization
       const ids = ['user-1', 'app-1']
       return () => ids.shift()
     })(),
-    '2026-05-06T01:10:00Z'
+    '2026-05-06T01:10:00Z',
   )
 
   const savedState = saveGenerationJob(stateWithPrompt, {
@@ -396,7 +491,7 @@ test('hasRenderableGenerationResult only returns true for succeeded jobs with ar
       providerLabel: 'zai',
       modelLabel: 'glm-5.1',
     }),
-    true
+    true,
   )
 
   assert.equal(
@@ -412,7 +507,7 @@ test('hasRenderableGenerationResult only returns true for succeeded jobs with ar
       providerLabel: null,
       modelLabel: null,
     }),
-    false
+    false,
   )
 })
 
@@ -430,6 +525,93 @@ test('getGenerationResultIssue surfaces a backend-result issue when success arri
       providerLabel: null,
       modelLabel: null,
     }),
-    'Backend returned a succeeded generation without generated artifacts.'
+    'Backend returned a succeeded generation without generated artifacts.',
+  )
+})
+
+test('getGenerationResultIssue prefers the backend failure message when generation fails without artifacts', () => {
+  assert.equal(
+    getGenerationResultIssue({
+      jobId: 'gen_failed',
+      status: 'failed',
+      summary: 'AI Composer generation failed.',
+      statusUrl: '/jobs/gen_failed',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+      artifactRefs: [],
+      artifacts: [],
+      providerLabel: null,
+      modelLabel: null,
+      errorMessage: 'AI Composer runtime failed: No resume artifact found for this thread.',
+    }),
+    'AI Composer runtime failed: No resume artifact found for this thread.',
+  )
+})
+
+test('devnet deployment is gated on a deployable artifact and connected wallet', () => {
+  const emptyState = createInitialMvpShellState()
+
+  assert.match(getDevnetDeploymentBlocker(emptyState, true), /Generate a deployable/)
+
+  const generatedState = saveGenerationJob(emptyState, {
+    jobId: 'gen_succeeded',
+    status: 'succeeded',
+    summary: 'AI Composer generation completed.',
+    statusUrl: '/jobs/gen_succeeded',
+    createdAt: '2026-05-06T01:10:00Z',
+    updatedAt: '2026-05-06T01:10:00Z',
+    artifactRefs: ['artifact_1'],
+    artifacts: [
+      {
+        artifactId: 'artifact_1',
+        name: 'program.so',
+        typeLabel: 'program_binary',
+        path: 'artifacts/program.so',
+        summary: 'Generated program binary.',
+      },
+    ],
+    providerLabel: null,
+    modelLabel: null,
+  })
+
+  assert.equal(getDeployableGenerationArtifact(generatedState.generationJob)?.artifactId, 'artifact_1')
+  assert.equal(getDevnetDeploymentBlocker(generatedState, false), 'Connect a wallet before devnet deployment.')
+  assert.equal(getDevnetDeploymentBlocker(generatedState, true), null)
+})
+
+test('deployment jobs survive serialization with signature request metadata', () => {
+  const savedState = saveDeploymentJob(createInitialMvpShellState(), {
+    jobId: 'dep_123',
+    status: 'blocked',
+    summary: 'Wallet signature required.',
+    statusUrl: '/jobs/dep_123',
+    createdAt: '2026-05-06T02:00:00Z',
+    updatedAt: '2026-05-06T02:00:00Z',
+    cluster: 'devnet',
+    sourceArtifactId: 'artifact_1',
+    payerWallet: 'payer111111111111111111111111111111111111',
+    authorityWallet: 'payer111111111111111111111111111111111111',
+    authorityMode: 'user_wallet_demo_authority',
+    programId: null,
+    transactionSignatures: [],
+    deploymentRefs: [],
+    verificationStatusAtDeploy: 'succeeded',
+    signatureRequest: {
+      requestId: 'sigreq_1',
+      transactionBase64: 'AQID',
+      minContextSlot: '42',
+      summary: 'Deploy artifact_1 to devnet.',
+      simulationSummary: 'Simulation passed.',
+    },
+  })
+
+  const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
+
+  assert.equal(restoredState?.deploymentJob?.jobId, 'dep_123')
+  assert.equal(restoredState?.deploymentJob?.signatureRequest?.requestId, 'sigreq_1')
+  assert.equal(getDeploymentStatusLabel('blocked'), 'Signature needed')
+  assert.equal(
+    DEVNET_DEPLOYMENT_DEMO_WARNING,
+    'Demo deploy: your wallet controls this program. Use multisig/governance for production.',
   )
 })

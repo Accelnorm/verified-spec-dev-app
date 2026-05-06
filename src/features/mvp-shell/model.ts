@@ -12,7 +12,25 @@ export type MvpProjectSeed = {
 
 export type WorkflowMode = 'vibe_coding' | 'professional_development'
 
-export const DEFAULT_WORKFLOW_MODE: WorkflowMode = 'professional_development'
+export const DEFAULT_WORKFLOW_MODE: WorkflowMode = 'vibe_coding'
+
+export type ProjectRouteSummary = {
+  projectId: string
+  title: string
+}
+
+export type ChatProjectRouteDecision =
+  | {
+      kind: 'existing'
+      project: ProjectRouteSummary
+    }
+  | {
+      kind: 'confirm'
+      project: ProjectRouteSummary
+    }
+  | {
+      kind: 'new'
+    }
 
 export type MvpDesignDoc = {
   title: string
@@ -28,6 +46,12 @@ export type VerificationProperty = {
   label: string
   statement: string
   rationale: string
+}
+
+export type CvlrSpec = {
+  checksRs: string
+  systemDocTxt: string
+  generatedAt: string
 }
 
 export type Suggestion = {
@@ -68,6 +92,34 @@ export type GenerationJobRecord = {
   artifacts: GenerationArtifactRecord[]
   providerLabel?: string | null
   modelLabel?: string | null
+  errorMessage?: string | null
+}
+
+export type DeploymentTransactionRequest = {
+  requestId: string
+  transactionBase64: string
+  minContextSlot: string | null
+  summary: string
+  simulationSummary: string | null
+}
+
+export type DeploymentJobRecord = {
+  jobId: string
+  status: string
+  summary: string
+  statusUrl: string
+  createdAt: string
+  updatedAt: string
+  cluster: string
+  sourceArtifactId: string
+  payerWallet: string | null
+  authorityWallet: string | null
+  authorityMode: string
+  programId: string | null
+  transactionSignatures: string[]
+  deploymentRefs: string[]
+  verificationStatusAtDeploy: string | null
+  signatureRequest: DeploymentTransactionRequest | null
 }
 
 export type MvpShellState = {
@@ -78,8 +130,13 @@ export type MvpShellState = {
   designDocApprovedAt: string | null
   verificationProperties: VerificationProperty[]
   verificationPropertiesApprovedAt: string | null
+  cvlrSpec: CvlrSpec | null
+  cvlrSpecApprovedAt: string | null
+  secProReviewRequestedAt: string | null
+  publishedAt: string | null
   suggestions: Suggestion[]
   generationJob: GenerationJobRecord | null
+  deploymentJob: DeploymentJobRecord | null
 }
 
 type StoredMvpShellState = {
@@ -90,8 +147,13 @@ type StoredMvpShellState = {
   designDocApprovedAt?: string | null
   verificationProperties?: VerificationProperty[]
   verificationPropertiesApprovedAt?: string | null
+  cvlrSpec?: CvlrSpec | null
+  cvlrSpecApprovedAt?: string | null
+  secProReviewRequestedAt?: string | null
+  publishedAt?: string | null
   suggestions?: Suggestion[]
   generationJob: GenerationJobRecord | null
+  deploymentJob?: DeploymentJobRecord | null
 }
 
 export type GenerationJobRequest = {
@@ -99,10 +161,13 @@ export type GenerationJobRequest = {
   workflow_mode: string
   project_type: string
   design_doc: string
+  cvlr_specs_ready?: boolean
 }
 
-export const MVP_CAPTURE_ACK =
-  'Project request captured. Review the Design Doc in Workspace before generation.'
+export const DEVNET_DEPLOYMENT_DEMO_WARNING =
+  'Demo deploy: your wallet controls this program. Use multisig/governance for production.'
+
+export const MVP_CAPTURE_ACK = 'Project request captured. Review the Design Doc in Workspace before generation.'
 
 export function createInitialMvpShellState(): MvpShellState {
   return {
@@ -119,16 +184,64 @@ export function createInitialMvpShellState(): MvpShellState {
     designDocApprovedAt: null,
     verificationProperties: [],
     verificationPropertiesApprovedAt: null,
+    cvlrSpec: null,
+    cvlrSpecApprovedAt: null,
+    secProReviewRequestedAt: null,
+    publishedAt: null,
     suggestions: [],
     generationJob: null,
+    deploymentJob: null,
   }
+}
+
+export function createClearedChatState(workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE): MvpShellState {
+  return {
+    ...createInitialMvpShellState(),
+    workflowMode,
+  }
+}
+
+export function deriveChatProjectRouteDecision(
+  prompt: string,
+  projects: ProjectRouteSummary[],
+): ChatProjectRouteDecision {
+  const promptTokens = tokenizeRouteText(prompt)
+  if (promptTokens.length === 0 || projects.length === 0) {
+    return { kind: 'new' }
+  }
+
+  const [best] = projects
+    .map((project) => {
+      const titleTokens = tokenizeRouteText(project.title)
+      const overlap = titleTokens.filter((token) => promptTokens.includes(token)).length
+      const titleContained = titleTokens.length > 0 && titleTokens.every((token) => promptTokens.includes(token))
+      const promptContained = promptTokens.length > 0 && promptTokens.every((token) => titleTokens.includes(token))
+      const ratio = titleTokens.length === 0 ? 0 : overlap / titleTokens.length
+
+      return {
+        project,
+        score: ratio + (titleContained ? 0.5 : 0) + (promptContained ? 0.25 : 0),
+        overlap,
+      }
+    })
+    .sort((left, right) => right.score - left.score)
+
+  if (!best || best.overlap === 0) {
+    return { kind: 'new' }
+  }
+
+  if (best.score >= 0.45) {
+    return { kind: 'confirm', project: best.project }
+  }
+
+  return { kind: 'new' }
 }
 
 export function submitPrompt(
   state: MvpShellState,
   input: string,
   createId: () => string,
-  nowIso: string
+  nowIso: string,
 ): MvpShellState {
   const prompt = input.trim()
 
@@ -160,8 +273,13 @@ export function submitPrompt(
     designDocApprovedAt: null,
     verificationProperties: [],
     verificationPropertiesApprovedAt: null,
+    cvlrSpec: null,
+    cvlrSpecApprovedAt: null,
+    secProReviewRequestedAt: null,
+    publishedAt: null,
     suggestions: [],
     generationJob: null,
+    deploymentJob: null,
   }
 }
 
@@ -175,6 +293,7 @@ export function buildGenerationRequest(state: MvpShellState): GenerationJobReque
     workflow_mode: state.workflowMode,
     project_type: 'solana_mobile_app',
     design_doc: renderDesignDocMarkdown(state.designDoc),
+    ...(state.cvlrSpec ? { cvlr_specs_ready: true } : {}),
   }
 }
 
@@ -198,10 +317,51 @@ export function getGenerationBlocker(state: MvpShellState): string | null {
   if (!state.designDocApprovedAt) {
     return 'Approve the Design Doc in Workspace before generation.'
   }
-  if (!state.verificationPropertiesApprovedAt) {
+  if (state.verificationProperties.length === 0 || !state.verificationPropertiesApprovedAt) {
     return 'Review and approve the properties to prove before generation.'
   }
+  if (!state.cvlrSpec) {
+    return 'Generate CVLR specs from the approved properties before generation.'
+  }
+  if (!state.cvlrSpecApprovedAt) {
+    return 'Approve the CVLR specs before generation.'
+  }
   return null
+}
+
+export function getCvlrSpecBlocker(state: MvpShellState): string | null {
+  if (state.verificationProperties.length === 0) {
+    return 'Verification properties must exist before generating CVLR specs.'
+  }
+  if (!state.verificationPropertiesApprovedAt) {
+    return 'Approve the verification properties before generating CVLR specs.'
+  }
+  return null
+}
+
+export function getCvlrApprovalBlocker(state: MvpShellState): string | null {
+  if (!state.cvlrSpec) {
+    return 'Generate CVLR specs before approving.'
+  }
+  return null
+}
+
+export function approveCvlrSpec(state: MvpShellState, nowIso: string): MvpShellState {
+  if (!state.cvlrSpec) {
+    return state
+  }
+  return {
+    ...state,
+    cvlrSpecApprovedAt: nowIso,
+  }
+}
+
+export function saveCvlrSpec(state: MvpShellState, spec: CvlrSpec): MvpShellState {
+  return {
+    ...state,
+    cvlrSpec: spec,
+    cvlrSpecApprovedAt: null,
+  }
 }
 
 export function approveDesignDoc(state: MvpShellState, nowIso: string): MvpShellState {
@@ -212,7 +372,7 @@ export function approveDesignDoc(state: MvpShellState, nowIso: string): MvpShell
   return {
     ...state,
     designDocApprovedAt: nowIso,
-    verificationProperties: deriveVerificationProperties(state.designDoc, nowIso),
+    verificationProperties: state.verificationProperties,
     verificationPropertiesApprovedAt: null,
   }
 }
@@ -225,6 +385,8 @@ export function approveVerificationProperties(state: MvpShellState, nowIso: stri
   return {
     ...state,
     verificationPropertiesApprovedAt: nowIso,
+    cvlrSpec: null,
+    cvlrSpecApprovedAt: null,
   }
 }
 
@@ -232,6 +394,13 @@ export function saveGenerationJob(state: MvpShellState, job: GenerationJobRecord
   return {
     ...state,
     generationJob: job,
+  }
+}
+
+export function saveDeploymentJob(state: MvpShellState, job: DeploymentJobRecord): MvpShellState {
+  return {
+    ...state,
+    deploymentJob: job,
   }
 }
 
@@ -257,6 +426,62 @@ export function hasRenderableGenerationResult(job: GenerationJobRecord | null) {
   return Boolean(job && job.status === 'succeeded' && job.artifacts.length > 0)
 }
 
+export function getDeployableGenerationArtifact(job: GenerationJobRecord | null): GenerationArtifactRecord | null {
+  if (!hasRenderableGenerationResult(job)) {
+    return null
+  }
+
+  return (
+    job?.artifacts.find((artifact) => {
+      const searchable = `${artifact.name} ${artifact.typeLabel} ${artifact.path} ${artifact.summary}`.toLowerCase()
+      return (
+        searchable.includes('deployable') ||
+        searchable.includes('anchor') ||
+        searchable.includes('program_binary') ||
+        searchable.includes('program.so') ||
+        searchable.includes('bundle')
+      )
+    }) ??
+    job?.artifacts[0] ??
+    null
+  )
+}
+
+export function getDevnetDeploymentBlocker(state: MvpShellState, walletConnected: boolean): string | null {
+  if (!getDeployableGenerationArtifact(state.generationJob)) {
+    return 'Generate a deployable Solana program artifact before devnet deployment.'
+  }
+  if (!walletConnected) {
+    return 'Connect a wallet before devnet deployment.'
+  }
+  return null
+}
+
+export function getDeploymentStatusLabel(status: string) {
+  switch (status) {
+    case 'queued':
+      return 'Queued'
+    case 'running':
+      return 'Running'
+    case 'blocked':
+    case 'signature_needed':
+      return 'Signature needed'
+    case 'succeeded':
+      return 'Succeeded'
+    case 'failed':
+    case 'timed_out':
+    case 'canceled':
+      return 'Failed'
+    case 'unavailable':
+    default:
+      return 'Unavailable'
+  }
+}
+
+export function isActiveDeploymentJob(status: string) {
+  return status === 'queued' || status === 'running' || status === 'retrying'
+}
+
 export function getGenerationResultIssue(job: GenerationJobRecord | null) {
   if (!job) {
     return null
@@ -267,7 +492,7 @@ export function getGenerationResultIssue(job: GenerationJobRecord | null) {
   }
 
   if (job.status === 'failed' && job.artifacts.length === 0) {
-    return 'The backend did not return generated artifacts for this result.'
+    return job.errorMessage ?? 'The backend did not return generated artifacts for this result.'
   }
 
   return null
@@ -276,7 +501,7 @@ export function getGenerationResultIssue(job: GenerationJobRecord | null) {
 export function updateDesignDocField(
   state: MvpShellState,
   field: keyof Pick<MvpDesignDoc, 'title' | 'goal'>,
-  value: string
+  value: string,
 ): MvpShellState {
   if (!state.designDoc) {
     return state
@@ -297,7 +522,7 @@ export function updateDesignDocField(
 export function updateDesignDocListField(
   state: MvpShellState,
   field: keyof Pick<MvpDesignDoc, 'coreRequirements' | 'assumptions' | 'missingInformation'>,
-  value: string
+  value: string,
 ): MvpShellState {
   if (!state.designDoc) {
     return state
@@ -324,8 +549,13 @@ export function serializeMvpShellState(state: MvpShellState): string {
     designDocApprovedAt: state.designDocApprovedAt,
     verificationProperties: state.verificationProperties,
     verificationPropertiesApprovedAt: state.verificationPropertiesApprovedAt,
+    cvlrSpec: state.cvlrSpec,
+    cvlrSpecApprovedAt: state.cvlrSpecApprovedAt,
+    secProReviewRequestedAt: state.secProReviewRequestedAt,
+    publishedAt: state.publishedAt,
     suggestions: state.suggestions,
     generationJob: state.generationJob,
+    deploymentJob: state.deploymentJob,
   }
 
   return JSON.stringify(snapshot)
@@ -347,7 +577,11 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       return null
     }
 
-    if (parsed.latestPromptSeed !== null && parsed.latestPromptSeed !== undefined && !isPromptSeed(parsed.latestPromptSeed)) {
+    if (
+      parsed.latestPromptSeed !== null &&
+      parsed.latestPromptSeed !== undefined &&
+      !isPromptSeed(parsed.latestPromptSeed)
+    ) {
       return null
     }
 
@@ -362,7 +596,14 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       return null
     }
 
-    if (parsed.suggestions !== undefined && (!Array.isArray(parsed.suggestions) || !parsed.suggestions.every(isSuggestion))) {
+    if (
+      parsed.suggestions !== undefined &&
+      (!Array.isArray(parsed.suggestions) || !parsed.suggestions.every(isSuggestion))
+    ) {
+      return null
+    }
+
+    if (parsed.cvlrSpec !== undefined && parsed.cvlrSpec !== null && !isCvlrSpec(parsed.cvlrSpec)) {
       return null
     }
 
@@ -374,6 +615,16 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       }
 
       parsed.generationJob = normalizedGenerationJob
+    }
+
+    if (parsed.deploymentJob !== null && parsed.deploymentJob !== undefined) {
+      const normalizedDeploymentJob = normalizeDeploymentJobRecord(parsed.deploymentJob)
+
+      if (!normalizedDeploymentJob) {
+        return null
+      }
+
+      parsed.deploymentJob = normalizedDeploymentJob
     }
 
     return {
@@ -389,28 +640,24 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       verificationProperties: parsed.verificationProperties ?? [],
       verificationPropertiesApprovedAt:
         typeof parsed.verificationPropertiesApprovedAt === 'string' ? parsed.verificationPropertiesApprovedAt : null,
+      cvlrSpec: parsed.cvlrSpec ?? null,
+      cvlrSpecApprovedAt: typeof parsed.cvlrSpecApprovedAt === 'string' ? parsed.cvlrSpecApprovedAt : null,
+      secProReviewRequestedAt: typeof parsed.secProReviewRequestedAt === 'string' ? parsed.secProReviewRequestedAt : null,
+      publishedAt: typeof parsed.publishedAt === 'string' ? parsed.publishedAt : null,
       suggestions: parsed.suggestions ?? [],
       generationJob: (parsed.generationJob as GenerationJobRecord | undefined) ?? null,
+      deploymentJob: (parsed.deploymentJob as DeploymentJobRecord | undefined) ?? null,
     }
   } catch {
     return null
   }
 }
 
-export function mergeBackendProjectState(backendState: MvpShellState, localState: MvpShellState): MvpShellState {
-  if (!backendState.designDoc || !localState.designDoc || !isSameDesignDoc(backendState.designDoc, localState.designDoc)) {
-    return backendState
-  }
-
-  return {
-    ...backendState,
-    designDocApprovedAt: localState.designDocApprovedAt,
-    verificationProperties: localState.verificationProperties,
-    verificationPropertiesApprovedAt: localState.verificationPropertiesApprovedAt,
-  }
+export function mergeBackendProjectState(backendState: MvpShellState, _localState: MvpShellState): MvpShellState {
+  return backendState
 }
 
-function renderDesignDocMarkdown(designDoc: MvpDesignDoc): string {
+export function renderDesignDocMarkdown(designDoc: MvpDesignDoc): string {
   return [
     `# ${designDoc.title}`,
     '',
@@ -472,48 +719,18 @@ function splitLines(value: string): string[] {
     .filter(Boolean)
 }
 
-function deriveVerificationProperties(designDoc: MvpDesignDoc, nowIso: string): VerificationProperty[] {
-  const title = designDoc.title.trim() || 'MVP'
-  const primaryRequirement = designDoc.coreRequirements[0] ?? 'The approved Design Doc requirements are preserved.'
-  const missingInformation =
-    designDoc.missingInformation.length > 0
-      ? 'Open questions are resolved by the user or explicitly defaulted before generation.'
-      : 'The approved Design Doc has no unresolved missing-information items.'
-
-  return [
-    {
-      id: `prop_request_preserved_${nowIso}`,
-      label: 'Property 01',
-      statement: `${title} generation preserves the approved goal and core requirements.`,
-      rationale: 'Prevents CVLR generation from drifting away from the Design Doc the user approved.',
-    },
-    {
-      id: `prop_primary_requirement_${nowIso}`,
-      label: 'Property 02',
-      statement: primaryRequirement,
-      rationale: 'Turns the highest-priority requirement into an explicit proof target before generation.',
-    },
-    {
-      id: `prop_missing_information_${nowIso}`,
-      label: 'Property 03',
-      statement: missingInformation,
-      rationale: 'Keeps assumptions and open questions visible before AI Composer/CVLR work starts.',
-    },
-  ]
-}
-
-function isSameDesignDoc(left: MvpDesignDoc, right: MvpDesignDoc) {
-  return (
-    left.title === right.title &&
-    left.goal === right.goal &&
-    left.coreRequirements.join('\n') === right.coreRequirements.join('\n') &&
-    left.assumptions.join('\n') === right.assumptions.join('\n') &&
-    left.missingInformation.join('\n') === right.missingInformation.join('\n')
-  )
-}
-
 function renderBulletList(entries: string[]): string[] {
   return entries.map((entry) => `- ${entry}`)
+}
+
+function tokenizeRouteText(value: string): string[] {
+  const stopWords = new Set(['a', 'an', 'and', 'app', 'build', 'create', 'for', 'mvp', 'new', 'project', 'the', 'to'])
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stopWords.has(token))
 }
 
 function isChatMessage(value: unknown): value is ChatMessage {
@@ -602,6 +819,19 @@ function isVerificationProperty(value: unknown): value is VerificationProperty {
   )
 }
 
+function isCvlrSpec(value: unknown): value is CvlrSpec {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<CvlrSpec>
+  return (
+    typeof candidate.checksRs === 'string' &&
+    typeof candidate.systemDocTxt === 'string' &&
+    typeof candidate.generatedAt === 'string'
+  )
+}
+
 function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
   if (!value || typeof value !== 'object') {
     return false
@@ -619,16 +849,32 @@ function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
     candidate.artifactRefs.every((entry) => typeof entry === 'string') &&
     Array.isArray(candidate.artifacts) &&
     candidate.artifacts.every(isGenerationArtifactRecord) &&
-    (candidate.currentPhase === undefined || candidate.currentPhase === null || typeof candidate.currentPhase === 'string') &&
-    (candidate.progressSummary === undefined || candidate.progressSummary === null || typeof candidate.progressSummary === 'string') &&
+    (candidate.currentPhase === undefined ||
+      candidate.currentPhase === null ||
+      typeof candidate.currentPhase === 'string') &&
+    (candidate.progressSummary === undefined ||
+      candidate.progressSummary === null ||
+      typeof candidate.progressSummary === 'string') &&
     (candidate.startedAt === undefined || candidate.startedAt === null || typeof candidate.startedAt === 'string') &&
     (candidate.finishedAt === undefined || candidate.finishedAt === null || typeof candidate.finishedAt === 'string') &&
-    (candidate.lastHeartbeatAt === undefined || candidate.lastHeartbeatAt === null || typeof candidate.lastHeartbeatAt === 'string') &&
-    (candidate.aiComposerThreadId === undefined || candidate.aiComposerThreadId === null || typeof candidate.aiComposerThreadId === 'string') &&
-    (candidate.lastCheckpointId === undefined || candidate.lastCheckpointId === null || typeof candidate.lastCheckpointId === 'string') &&
-    (candidate.latestLogExcerpt === undefined || candidate.latestLogExcerpt === null || typeof candidate.latestLogExcerpt === 'string') &&
-    (candidate.lastMaterializedSnapshotAt === undefined || candidate.lastMaterializedSnapshotAt === null || typeof candidate.lastMaterializedSnapshotAt === 'string') &&
-    (candidate.providerLabel === undefined || candidate.providerLabel === null || typeof candidate.providerLabel === 'string') &&
+    (candidate.lastHeartbeatAt === undefined ||
+      candidate.lastHeartbeatAt === null ||
+      typeof candidate.lastHeartbeatAt === 'string') &&
+    (candidate.aiComposerThreadId === undefined ||
+      candidate.aiComposerThreadId === null ||
+      typeof candidate.aiComposerThreadId === 'string') &&
+    (candidate.lastCheckpointId === undefined ||
+      candidate.lastCheckpointId === null ||
+      typeof candidate.lastCheckpointId === 'string') &&
+    (candidate.latestLogExcerpt === undefined ||
+      candidate.latestLogExcerpt === null ||
+      typeof candidate.latestLogExcerpt === 'string') &&
+    (candidate.lastMaterializedSnapshotAt === undefined ||
+      candidate.lastMaterializedSnapshotAt === null ||
+      typeof candidate.lastMaterializedSnapshotAt === 'string') &&
+    (candidate.providerLabel === undefined ||
+      candidate.providerLabel === null ||
+      typeof candidate.providerLabel === 'string') &&
     (candidate.modelLabel === undefined || candidate.modelLabel === null || typeof candidate.modelLabel === 'string')
   )
 }
@@ -660,7 +906,9 @@ function normalizeGenerationJobRecord(value: unknown): GenerationJobRecord | nul
     latestLogExcerpt: typeof candidate.latestLogExcerpt === 'string' ? candidate.latestLogExcerpt : null,
     lastMaterializedSnapshotAt:
       typeof candidate.lastMaterializedSnapshotAt === 'string' ? candidate.lastMaterializedSnapshotAt : null,
-    artifactRefs: Array.isArray(candidate.artifactRefs) ? candidate.artifactRefs.filter((entry): entry is string => typeof entry === 'string') : [],
+    artifactRefs: Array.isArray(candidate.artifactRefs)
+      ? candidate.artifactRefs.filter((entry): entry is string => typeof entry === 'string')
+      : [],
     artifacts: Array.isArray(candidate.artifacts) ? candidate.artifacts.filter(isGenerationArtifactRecord) : [],
     providerLabel: typeof candidate.providerLabel === 'string' ? candidate.providerLabel : null,
     modelLabel: typeof candidate.modelLabel === 'string' ? candidate.modelLabel : null,
@@ -682,4 +930,90 @@ function isGenerationArtifactRecord(value: unknown): value is GenerationArtifact
     typeof candidate.path === 'string' &&
     typeof candidate.summary === 'string'
   )
+}
+
+function isDeploymentTransactionRequest(value: unknown): value is DeploymentTransactionRequest {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<DeploymentTransactionRequest>
+  return (
+    typeof candidate.requestId === 'string' &&
+    typeof candidate.transactionBase64 === 'string' &&
+    (candidate.minContextSlot === null || typeof candidate.minContextSlot === 'string') &&
+    typeof candidate.summary === 'string' &&
+    (candidate.simulationSummary === null || typeof candidate.simulationSummary === 'string')
+  )
+}
+
+function isDeploymentJobRecord(value: unknown): value is DeploymentJobRecord {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<DeploymentJobRecord>
+  return (
+    typeof candidate.jobId === 'string' &&
+    typeof candidate.status === 'string' &&
+    typeof candidate.summary === 'string' &&
+    typeof candidate.statusUrl === 'string' &&
+    typeof candidate.createdAt === 'string' &&
+    typeof candidate.updatedAt === 'string' &&
+    typeof candidate.cluster === 'string' &&
+    typeof candidate.sourceArtifactId === 'string' &&
+    (candidate.payerWallet === null || typeof candidate.payerWallet === 'string') &&
+    (candidate.authorityWallet === null || typeof candidate.authorityWallet === 'string') &&
+    typeof candidate.authorityMode === 'string' &&
+    (candidate.programId === null || typeof candidate.programId === 'string') &&
+    Array.isArray(candidate.transactionSignatures) &&
+    candidate.transactionSignatures.every((entry) => typeof entry === 'string') &&
+    Array.isArray(candidate.deploymentRefs) &&
+    candidate.deploymentRefs.every((entry) => typeof entry === 'string') &&
+    (candidate.verificationStatusAtDeploy === null || typeof candidate.verificationStatusAtDeploy === 'string') &&
+    (candidate.signatureRequest === null || isDeploymentTransactionRequest(candidate.signatureRequest))
+  )
+}
+
+function normalizeDeploymentJobRecord(value: unknown): DeploymentJobRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const candidate = value as Partial<DeploymentJobRecord> & {
+    transactionSignatures?: unknown
+    deploymentRefs?: unknown
+    signatureRequest?: unknown
+  }
+
+  const normalizedSignatureRequest =
+    candidate.signatureRequest && isDeploymentTransactionRequest(candidate.signatureRequest)
+      ? candidate.signatureRequest
+      : null
+
+  const normalized: DeploymentJobRecord = {
+    jobId: typeof candidate.jobId === 'string' ? candidate.jobId : '',
+    status: typeof candidate.status === 'string' ? candidate.status : '',
+    summary: typeof candidate.summary === 'string' ? candidate.summary : '',
+    statusUrl: typeof candidate.statusUrl === 'string' ? candidate.statusUrl : '',
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : '',
+    updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : '',
+    cluster: typeof candidate.cluster === 'string' ? candidate.cluster : 'devnet',
+    sourceArtifactId: typeof candidate.sourceArtifactId === 'string' ? candidate.sourceArtifactId : '',
+    payerWallet: typeof candidate.payerWallet === 'string' ? candidate.payerWallet : null,
+    authorityWallet: typeof candidate.authorityWallet === 'string' ? candidate.authorityWallet : null,
+    authorityMode: typeof candidate.authorityMode === 'string' ? candidate.authorityMode : 'user_wallet_demo_authority',
+    programId: typeof candidate.programId === 'string' ? candidate.programId : null,
+    transactionSignatures: Array.isArray(candidate.transactionSignatures)
+      ? candidate.transactionSignatures.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    deploymentRefs: Array.isArray(candidate.deploymentRefs)
+      ? candidate.deploymentRefs.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    verificationStatusAtDeploy:
+      typeof candidate.verificationStatusAtDeploy === 'string' ? candidate.verificationStatusAtDeploy : null,
+    signatureRequest: normalizedSignatureRequest,
+  }
+
+  return isDeploymentJobRecord(normalized) ? normalized : null
 }

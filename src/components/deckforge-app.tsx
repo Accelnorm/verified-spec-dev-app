@@ -1,22 +1,32 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native'
 import { useMobileWallet } from '@wallet-ui/react-native-kit'
 import {
-  approveDesignDoc,
-  approveVerificationProperties,
   buildGenerationRequest,
+  createClearedChatState,
   createInitialMvpShellState,
+  DEVNET_DEPLOYMENT_DEMO_WARNING,
+  deriveChatProjectRouteDecision,
+  getDeployableGenerationArtifact,
+  getDeploymentStatusLabel,
+  getDevnetDeploymentBlocker,
   getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
   hasRenderableGenerationResult,
+  isActiveDeploymentJob,
   mergeBackendProjectState,
   restoreMvpShellState,
+  saveDeploymentJob,
   saveGenerationJob,
+  saveCvlrSpec,
   serializeMvpShellState,
   submitPrompt,
+  type ChatProjectRouteDecision,
+  type CvlrSpec,
+  type DeploymentJobRecord,
   type GenerationArtifactRecord,
   type ChatMessage,
   type GenerationJobRecord,
@@ -30,88 +40,57 @@ import {
   updateWorkflowMode,
 } from '../features/mvp-shell/model'
 import {
+  approveProjectCvlrSpec,
+  approveProjectDesignDoc,
+  approveProjectVerificationProperties,
   applyVibeDefaultsToProject,
   capturePromptToProject,
   listProjects,
+  listProjectSummaries,
+  publishProject,
   readProjectSnapshot,
   saveDesignDocToProject,
   sendProjectChatMessage,
+  type ProjectSnapshot,
   updateProjectWorkflowMode,
 } from '../features/mvp-shell/backend'
+import { generateCvlrSpec } from '../features/mvp-shell/cvlr'
+import {
+  bytesToBase64,
+  decodeBase64Transaction,
+  readDeploymentJobStatus,
+  submitDeploymentSignature,
+  submitDevnetDeploymentJob,
+} from '../features/mvp-shell/deployment'
 import { readGenerationJobStatus, submitGenerationJob } from '../features/mvp-shell/generation'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
 type DisplayWorkflowMode = 'Vibe' | 'Pro'
 type ExploreTab = 'projects' | 'properties'
+type WorkspaceCardTarget =
+  | 'chat'
+  | 'design-doc'
+  | 'properties'
+  | 'cvlr-spec'
+  | 'generation'
+  | 'deployment'
+  | 'publish'
+  | 'daily-property'
+type DesignDocSectionKey = 'title' | 'goal' | 'coreRequirements' | 'assumptions' | 'missingInformation'
+type DesignDocScrollTarget = DesignDocSectionKey | 'approval'
+type PendingRouteConfirmation = Extract<ChatProjectRouteDecision, { kind: 'confirm' }> & {
+  prompt: string
+}
 type AppSettings = {
   certoraApiKey: string
   easAuth: string
   expoAccount: string
 }
-const projects = [
-  {
-    name: 'Escrow Lens',
-    summary: '1 blocker, generation waiting',
-    badge: 'Now',
-    stage: 'Props',
-    assurance: 'Spec ready, properties pending',
-  },
-  {
-    name: 'Policy Mint',
-    summary: 'PBT running, no blocker',
-    badge: 'Verify',
-    stage: 'Verify',
-    assurance: 'Level 2 in progress',
-  },
-  {
-    name: 'Spec Atlas',
-    summary: 'Record draft ready',
-    badge: 'Publish',
-    stage: 'Record',
-    assurance: 'Attestation manifest drafted',
-  },
-]
-
-const builderProjects = [
-  {
-    name: 'Protocol Atlas',
-    summary: 'Published project with a visible assurance ladder.',
-    badge: 'L2',
-  },
-  {
-    name: 'Vault Witness',
-    summary: 'Escrow project. Partial property checks.',
-    badge: 'Partial',
-  },
-  {
-    name: 'Record Studio',
-    summary: 'Publishing project with a visible record trail.',
-    badge: 'Live',
-  },
-]
-
-const propertyGuides = [
-  {
-    name: 'Money never disappears',
-    summary: 'Learn how builders turn balances, fees, and withdrawals into conservation checks.',
-    badge: 'Invariant',
-  },
-  {
-    name: 'Only the right actor can pause',
-    summary: 'Translate product roles into clear authority properties before code exists.',
-    badge: 'Authority',
-  },
-  {
-    name: 'Every record matches its source',
-    summary: 'See how hashes and manifests become simple traceability properties.',
-    badge: 'Trace',
-  },
-]
-
-const stages = ['Clarify', 'Props', 'Gen', 'Verify', 'Deploy', 'Record']
 const MVP_SHELL_STORAGE_KEY = 'verified-spec-dev.mvp-shell'
 const ACTIVE_PROJECT_STORAGE_KEY = 'verified-spec-dev.active-project'
 const LOCAL_BACKEND_BASE_URL = 'http://10.0.2.2:8000'
+const PROGRAM_DEPLOYMENT_FLOW_ENABLED = false
+const PROGRAM_DEPLOYMENT_DISABLED_MESSAGE = 'Program deployment is disabled until this flow has been tested end to end.'
 
 function getWalletErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
@@ -131,8 +110,23 @@ function toCanonicalWorkflowMode(mode: DisplayWorkflowMode): WorkflowMode {
   return mode === 'Vibe' ? 'vibe_coding' : 'professional_development'
 }
 
+function areDesignDocsEqual(left: MvpDesignDoc | null, right: MvpDesignDoc | null) {
+  if (!left || !right) {
+    return left === right
+  }
+
+  return (
+    left.title === right.title &&
+    left.goal === right.goal &&
+    left.updatedAt === right.updatedAt &&
+    left.coreRequirements.join('\n') === right.coreRequirements.join('\n') &&
+    left.assumptions.join('\n') === right.assumptions.join('\n') &&
+    left.missingInformation.join('\n') === right.missingInformation.join('\n')
+  )
+}
+
 export function SpecDrivenApp() {
-  const { account, connect, disconnect } = useMobileWallet()
+  const { account, connect, disconnect, signAndSendTransaction } = useMobileWallet()
   const [activeTab, setActiveTab] = useState<PrimaryTab>('chat')
   const [suggestionPage, setSuggestionPage] = useState(0)
   const [selectedSuggestion, setSelectedSuggestion] = useState<Suggestion | null>(null)
@@ -142,15 +136,30 @@ export function SpecDrivenApp() {
   const [draft, setDraft] = useState('')
   const [followUpDraft, setFollowUpDraft] = useState('')
   const [followUpNote, setFollowUpNote] = useState('')
+  const [pendingRouteConfirmation, setPendingRouteConfirmation] = useState<PendingRouteConfirmation | null>(null)
   const [exploreTab, setExploreTab] = useState<ExploreTab>('projects')
   const [walletError, setWalletError] = useState<string | null>(null)
+  const [deploymentError, setDeploymentError] = useState<string | null>(null)
   const [generationError, setGenerationError] = useState<string | null>(null)
+  const [isRefreshingDeploymentStatus, setIsRefreshingDeploymentStatus] = useState(false)
+  const [isSigningDeployment, setIsSigningDeployment] = useState(false)
+  const [isSubmittingDeployment, setIsSubmittingDeployment] = useState(false)
   const [isSubmittingGeneration, setIsSubmittingGeneration] = useState(false)
   const [isRefreshingGenerationStatus, setIsRefreshingGenerationStatus] = useState(false)
   const [isSendingFollowUp, setIsSendingFollowUp] = useState(false)
   const [isApplyingVibeDefaults, setIsApplyingVibeDefaults] = useState(false)
+  const [isGeneratingCvlrSpec, setIsGeneratingCvlrSpec] = useState(false)
+  const [isApprovingCvlrSpec, setIsApprovingCvlrSpec] = useState(false)
+  const [cvlrError, setCvlrError] = useState<string | null>(null)
+  const [isPublishing, setIsPublishing] = useState(false)
   const generationSubmitLock = useRef(false)
   const designDocSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const skipAutoProjectHydrate = useRef(false)
+  const skipNextDesignDocAutosave = useRef(false)
+  const workspaceScrollRef = useRef<ScrollView>(null)
+  const workspaceCardOffsets = useRef<Partial<Record<WorkspaceCardTarget, number>>>({})
+  const designDocSectionOffsets = useRef<Partial<Record<DesignDocScrollTarget, number>>>({})
+  const [approvedDesignDocSections, setApprovedDesignDocSections] = useState<DesignDocSectionKey[]>([])
   const [appSettings, setAppSettings] = useState<AppSettings>({
     certoraApiKey: '',
     easAuth: '',
@@ -164,11 +173,25 @@ export function SpecDrivenApp() {
   const displayMode = toDisplayWorkflowMode(mvpState.workflowMode)
   const screenKey = `${activeTab}-${selectedSuggestion ? selectedSuggestion.id : 'main'}-${exploreTab}`
 
+  function applyBackendSnapshot(snapshot: ProjectSnapshot, mode: 'replace' | 'merge' = 'replace') {
+    skipNextDesignDocAutosave.current = true
+    if (mode === 'merge') {
+      setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
+    } else {
+      setMvpState(snapshot.state)
+    }
+    setActiveProjectId(snapshot.projectId)
+  }
+
   useEffect(() => {
     if (suggestionPage !== normalizedSuggestionPage) {
       setSuggestionPage(normalizedSuggestionPage)
     }
-    if (selectedSuggestion && !mvpState.suggestions.some((suggestion) => suggestion.id === selectedSuggestion.id)) {
+    if (
+      selectedSuggestion &&
+      !selectedSuggestion.id.startsWith('design-doc-') &&
+      !mvpState.suggestions.some((suggestion) => suggestion.id === selectedSuggestion.id)
+    ) {
       setSelectedSuggestion(null)
     }
   }, [mvpState.suggestions, normalizedSuggestionPage, selectedSuggestion, suggestionPage])
@@ -183,6 +206,7 @@ export function SpecDrivenApp() {
         const storedProjectId = await AsyncStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)
 
         if (!isCancelled && restoredState) {
+          skipNextDesignDocAutosave.current = true
           setMvpState(restoredState)
         }
         if (!isCancelled && storedProjectId) {
@@ -226,9 +250,12 @@ export function SpecDrivenApp() {
             projectId: activeProjectId,
           })
           if (!isCancelled) {
-            setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
-            setActiveProjectId(snapshot.projectId)
+            applyBackendSnapshot(snapshot, 'merge')
           }
+          return
+        }
+
+        if (skipAutoProjectHydrate.current) {
           return
         }
 
@@ -241,8 +268,7 @@ export function SpecDrivenApp() {
           projectId: projectIds[0],
         })
         if (!isCancelled) {
-          setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
-          setActiveProjectId(snapshot.projectId)
+          applyBackendSnapshot(snapshot, 'merge')
         }
       } catch {
         // Keep local cache when backend data is unavailable.
@@ -261,18 +287,31 @@ export function SpecDrivenApp() {
       return
     }
 
+    if (skipNextDesignDocAutosave.current) {
+      skipNextDesignDocAutosave.current = false
+      return
+    }
+
     if (designDocSaveTimer.current) {
       clearTimeout(designDocSaveTimer.current)
     }
 
     designDocSaveTimer.current = setTimeout(() => {
+      const designDocToSave = mvpState.designDoc!
       void saveDesignDocToProject({
         backendBaseUrl: LOCAL_BACKEND_BASE_URL,
         projectId: activeProjectId,
-        designDoc: mvpState.designDoc!,
-      }).catch(() => {
-        // Preserve local edits if the backend is unavailable.
+        designDoc: designDocToSave,
       })
+        .then((snapshot) => {
+          setMvpState((currentState) =>
+            areDesignDocsEqual(currentState.designDoc, designDocToSave) ? snapshot.state : currentState,
+          )
+          setActiveProjectId(snapshot.projectId)
+        })
+        .catch(() => {
+          // Preserve local edits if the backend is unavailable.
+        })
     }, 500)
 
     return () => {
@@ -281,21 +320,6 @@ export function SpecDrivenApp() {
       }
     }
   }, [activeProjectId, hasLoadedMvpState, mvpState.designDoc])
-
-  useEffect(() => {
-    const job = mvpState.generationJob
-    if (!job || !isActiveGenerationJob(job.status)) {
-      return
-    }
-
-    const timer = setInterval(() => {
-      void handleGenerationRefresh()
-    }, 15000)
-
-    return () => {
-      clearInterval(timer)
-    }
-  }, [mvpState.generationJob?.jobId, mvpState.generationJob?.status, isRefreshingGenerationStatus])
 
   async function handleWalletPress() {
     setWalletError(null)
@@ -311,6 +335,30 @@ export function SpecDrivenApp() {
     }
   }
 
+  async function capturePrompt(prompt: string, projectId: string | null) {
+    try {
+      const snapshot = await capturePromptToProject({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId,
+        prompt,
+        workflowMode: mvpState.workflowMode,
+      })
+      applyBackendSnapshot(snapshot)
+      skipAutoProjectHydrate.current = false
+    } catch {
+      setMvpState((currentState) =>
+        submitPrompt(
+          currentState,
+          prompt,
+          () => `message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+          new Date().toISOString(),
+        ),
+      )
+    }
+    setDraft('')
+    setPendingRouteConfirmation(null)
+  }
+
   async function handleSendMessage() {
     const prompt = draft.trim()
     if (!prompt) {
@@ -318,20 +366,50 @@ export function SpecDrivenApp() {
     }
 
     try {
-      const snapshot = await capturePromptToProject({
-        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
-        projectId: activeProjectId,
-        prompt,
-        workflowMode: mvpState.workflowMode,
-      })
-      setMvpState(snapshot.state)
-      setActiveProjectId(snapshot.projectId)
+      const projects = await listProjectSummaries(LOCAL_BACKEND_BASE_URL)
+      const routeDecision = deriveChatProjectRouteDecision(prompt, projects)
+      if (routeDecision.kind === 'existing') {
+        await capturePrompt(prompt, routeDecision.project.projectId)
+        return
+      }
+      if (routeDecision.kind === 'confirm') {
+        setPendingRouteConfirmation({ ...routeDecision, prompt })
+        setDraft('')
+        return
+      }
     } catch {
-      setMvpState((currentState) =>
-        submitPrompt(currentState, prompt, () => `message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, new Date().toISOString())
-      )
+      // If routing data is unavailable, treat the prompt as a new local/backend project.
     }
+
+    await capturePrompt(prompt, null)
+  }
+
+  function handleClearChat() {
+    skipAutoProjectHydrate.current = true
+    setActiveProjectId(null)
+    setMvpState((currentState) => createClearedChatState(currentState.workflowMode))
     setDraft('')
+    setFollowUpDraft('')
+    setFollowUpNote('')
+    setSelectedSuggestion(null)
+    setPendingRouteConfirmation(null)
+    setGenerationError(null)
+    setCvlrError(null)
+    setDeploymentError(null)
+  }
+
+  async function handleConfirmExistingProjectRoute() {
+    if (!pendingRouteConfirmation) {
+      return
+    }
+    await capturePrompt(pendingRouteConfirmation.prompt, pendingRouteConfirmation.project.projectId)
+  }
+
+  async function handleStartNewProjectRoute() {
+    if (!pendingRouteConfirmation) {
+      return
+    }
+    await capturePrompt(pendingRouteConfirmation.prompt, null)
   }
 
   async function handleModeChange(nextMode: DisplayWorkflowMode) {
@@ -349,8 +427,7 @@ export function SpecDrivenApp() {
         projectId: activeProjectId,
         workflowMode,
       })
-      setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
-      setActiveProjectId(snapshot.projectId)
+      applyBackendSnapshot(snapshot, 'merge')
     } catch {
       setGenerationError('Workflow mode is saved locally. Backend mode save is unavailable right now.')
     }
@@ -368,8 +445,7 @@ export function SpecDrivenApp() {
         backendBaseUrl: LOCAL_BACKEND_BASE_URL,
         projectId: activeProjectId,
       })
-      setMvpState(snapshot.state)
-      setActiveProjectId(snapshot.projectId)
+      applyBackendSnapshot(snapshot)
     } catch (error) {
       setGenerationError(error instanceof Error ? error.message : 'AI defaults are unavailable right now.')
     } finally {
@@ -377,10 +453,161 @@ export function SpecDrivenApp() {
     }
   }
 
+  async function handleGenerateCvlrSpec() {
+    if (!activeProjectId || isGeneratingCvlrSpec || !mvpState.designDoc) {
+      return
+    }
+
+    setCvlrError(null)
+    setIsGeneratingCvlrSpec(true)
+    try {
+      const spec = await generateCvlrSpec({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+        verificationProperties: mvpState.verificationProperties,
+        designDoc: mvpState.designDoc,
+      })
+      setMvpState((current) => saveCvlrSpec(current, spec))
+    } catch (error) {
+      setCvlrError(error instanceof Error ? error.message : 'Formal verification specification generation failed.')
+    } finally {
+      setIsGeneratingCvlrSpec(false)
+    }
+  }
+
+  async function handleApproveCvlrSpec() {
+    if (!activeProjectId || isApprovingCvlrSpec) {
+      return
+    }
+
+    setCvlrError(null)
+    setIsApprovingCvlrSpec(true)
+    try {
+      const snapshot = await approveProjectCvlrSpec({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+      })
+      applyBackendSnapshot(snapshot)
+    } catch (error) {
+      setCvlrError(error instanceof Error ? error.message : 'Formal verification specification approval failed.')
+    } finally {
+      setIsApprovingCvlrSpec(false)
+    }
+  }
+
+  function handleSuggestProperty(text: string) {
+    setDraft(`I want to add this invariant to my program: ${text.trim()}`)
+    setActiveTab('chat')
+  }
+
+  async function handlePublish() {
+    if (!activeProjectId || isPublishing) {
+      return
+    }
+
+    setIsPublishing(true)
+    try {
+      const snapshot = await publishProject({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+      })
+      applyBackendSnapshot(snapshot)
+    } catch {
+      // publish errors are non-critical; surface via the card state (publishedAt stays null)
+    } finally {
+      setIsPublishing(false)
+    }
+  }
+
   function handleSuggestionPress(suggestion: Suggestion) {
     setSelectedSuggestion(suggestion)
     setFollowUpDraft('')
     setFollowUpNote('')
+  }
+
+  function handleDiscussDesignDocSection(section: { key: DesignDocSectionKey; label: string; value: string }) {
+    setSelectedSuggestion({
+      id: `design-doc-${section.key}`,
+      label: 'Design Doc section',
+      title: `Change ${section.label}`,
+      body: section.value,
+      detail: section.value || `Discuss what should change in the ${section.label} section.`,
+      impact: 'The backend reply can return an updated Design Doc snapshot for Workspace review.',
+      createdAt: new Date().toISOString(),
+    })
+    setFollowUpDraft(`Let's revise the ${section.label} section. `)
+    setFollowUpNote('')
+    setActiveTab('chat')
+  }
+
+  function handleApproveDesignDocSection(sectionKey: DesignDocSectionKey) {
+    setApprovedDesignDocSections((current) => {
+      const alreadyApproved = current.includes(sectionKey)
+      const nextApprovedSections = alreadyApproved ? current.filter((key) => key !== sectionKey) : [...current, sectionKey]
+
+      if (!alreadyApproved) {
+        const sectionOrder: DesignDocSectionKey[] = ['title', 'goal', 'coreRequirements', 'assumptions', 'missingInformation']
+        const currentIndex = sectionOrder.indexOf(sectionKey)
+        const nextSection =
+          currentIndex >= 0
+            ? sectionOrder.slice(currentIndex + 1).find((key) => !nextApprovedSections.includes(key))
+            : null
+
+        setTimeout(() => {
+          scrollToDesignDocTarget(nextSection ?? 'approval')
+        }, 50)
+      }
+
+      return nextApprovedSections
+    })
+  }
+
+  function handleDesignDocFieldChange(field: 'title' | 'goal', value: string) {
+    setApprovedDesignDocSections((current) => current.filter((key) => key !== field))
+    setMvpState((currentState) => updateDesignDocField(currentState, field, value))
+  }
+
+  function handleDesignDocListFieldChange(
+    field: 'coreRequirements' | 'assumptions' | 'missingInformation',
+    value: string,
+  ) {
+    setApprovedDesignDocSections((current) => current.filter((key) => key !== field))
+    setMvpState((currentState) => updateDesignDocListField(currentState, field, value))
+  }
+
+  function handleWorkspaceCardLayout(target: WorkspaceCardTarget, y: number) {
+    workspaceCardOffsets.current[target] = y
+  }
+
+  function handleDesignDocSectionLayout(target: DesignDocScrollTarget, y: number) {
+    designDocSectionOffsets.current[target] = y
+  }
+
+  function scrollToDesignDocTarget(target: DesignDocScrollTarget) {
+    setActiveTab('workspace')
+    setTimeout(() => {
+      const cardY = workspaceCardOffsets.current['design-doc']
+      const sectionY = designDocSectionOffsets.current[target]
+
+      if (typeof cardY === 'number' && typeof sectionY === 'number') {
+        workspaceScrollRef.current?.scrollTo({ y: Math.max(cardY + sectionY - 8, 0), animated: true })
+      }
+    }, 50)
+  }
+
+  function handleGoToWorkspaceCard(target: WorkspaceCardTarget) {
+    if (target === 'chat') {
+      setActiveTab('chat')
+      return
+    }
+
+    setActiveTab('workspace')
+    setTimeout(() => {
+      const y = workspaceCardOffsets.current[target]
+      if (typeof y === 'number') {
+        workspaceScrollRef.current?.scrollTo({ y: Math.max(y - 8, 0), animated: true })
+      }
+    }, 50)
   }
 
   async function handleFollowUpSend() {
@@ -408,8 +635,7 @@ export function SpecDrivenApp() {
           suggestionTitle: selectedSuggestion?.title,
         },
       })
-      setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
-      setActiveProjectId(snapshot.projectId)
+      applyBackendSnapshot(snapshot, 'merge')
       setFollowUpDraft('')
       setFollowUpNote('Backend reply added to the project chat.')
     } catch {
@@ -430,14 +656,42 @@ export function SpecDrivenApp() {
     setActiveTab('workspace')
   }
 
-  function handleApproveDesignDoc() {
+  async function handleApproveDesignDoc() {
     setGenerationError(null)
-    setMvpState((currentState) => approveDesignDoc(currentState, new Date().toISOString()))
+
+    if (!activeProjectId) {
+      setGenerationError('Submit the project prompt in Chat before approving the Design Doc.')
+      return
+    }
+
+    try {
+      const snapshot = await approveProjectDesignDoc({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+      })
+      applyBackendSnapshot(snapshot)
+    } catch {
+      setGenerationError('Design Doc approval failed. Try again when the backend is reachable.')
+    }
   }
 
-  function handleApproveVerificationProperties() {
+  async function handleApproveVerificationProperties() {
     setGenerationError(null)
-    setMvpState((currentState) => approveVerificationProperties(currentState, new Date().toISOString()))
+
+    if (!activeProjectId) {
+      setGenerationError('Submit the project prompt in Chat before approving properties to prove.')
+      return
+    }
+
+    try {
+      const snapshot = await approveProjectVerificationProperties({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+      })
+      applyBackendSnapshot(snapshot)
+    } catch {
+      setGenerationError('Property approval failed. Try again when the backend is reachable.')
+    }
   }
 
   async function handleGenerationSubmit() {
@@ -476,7 +730,7 @@ export function SpecDrivenApp() {
     }
   }
 
-  async function handleGenerationRefresh() {
+  const handleGenerationRefresh = useCallback(async () => {
     if (!mvpState.generationJob || isRefreshingGenerationStatus) {
       return
     }
@@ -493,6 +747,123 @@ export function SpecDrivenApp() {
       setMvpState((currentState) => saveGenerationJob(currentState, job))
     } finally {
       setIsRefreshingGenerationStatus(false)
+    }
+  }, [isRefreshingGenerationStatus, mvpState.generationJob])
+
+  useEffect(() => {
+    const job = mvpState.generationJob
+    if (!job || !isActiveGenerationJob(job.status)) {
+      return
+    }
+
+    const timer = setInterval(() => {
+      void handleGenerationRefresh()
+    }, 15000)
+
+    return () => {
+      clearInterval(timer)
+    }
+  }, [handleGenerationRefresh, mvpState.generationJob])
+
+  async function handleDeploymentStart() {
+    if (!PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
+      setDeploymentError(PROGRAM_DEPLOYMENT_DISABLED_MESSAGE)
+      return
+    }
+
+    if (isSubmittingDeployment || isActiveDeploymentJob(mvpState.deploymentJob?.status ?? '')) {
+      return
+    }
+
+    const blocker = getDevnetDeploymentBlocker(mvpState, Boolean(accountAddress))
+    if (blocker) {
+      setDeploymentError(blocker)
+      return
+    }
+
+    const artifact = getDeployableGenerationArtifact(mvpState.generationJob)
+    if (!artifact || !accountAddress) {
+      setDeploymentError('Devnet deployment is unavailable for this generated result.')
+      return
+    }
+
+    setDeploymentError(null)
+    setIsSubmittingDeployment(true)
+
+    try {
+      const job = await submitDevnetDeploymentJob({
+        artifact,
+        authorityWallet: accountAddress,
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        payerWallet: accountAddress,
+        projectId: activeProjectId,
+        verificationStatusAcknowledged: mvpState.generationJob?.status ?? 'unknown',
+      })
+
+      setMvpState((currentState) => saveDeploymentJob(currentState, job))
+    } catch (error) {
+      setDeploymentError(error instanceof Error ? error.message : 'Devnet deployment request failed. Try again.')
+    } finally {
+      setIsSubmittingDeployment(false)
+    }
+  }
+
+  async function handleDeploymentSign() {
+    if (!PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
+      setDeploymentError(PROGRAM_DEPLOYMENT_DISABLED_MESSAGE)
+      return
+    }
+
+    const deploymentJob = mvpState.deploymentJob
+    const signatureRequest = deploymentJob?.signatureRequest
+
+    if (!deploymentJob || !signatureRequest || isSigningDeployment) {
+      return
+    }
+
+    setDeploymentError(null)
+    setIsSigningDeployment(true)
+
+    try {
+      const transaction = decodeBase64Transaction(signatureRequest.transactionBase64)
+      const minContextSlot = signatureRequest.minContextSlot ? BigInt(signatureRequest.minContextSlot) : 0n
+      const signatureBytes = await signAndSendTransaction(transaction, minContextSlot)
+      const updatedJob = await submitDeploymentSignature({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        job: deploymentJob,
+        signatureBase64: bytesToBase64(signatureBytes),
+      })
+
+      setMvpState((currentState) => saveDeploymentJob(currentState, updatedJob))
+    } catch (error) {
+      setDeploymentError(error instanceof Error ? error.message : 'Wallet signing failed. Try again from your wallet.')
+    } finally {
+      setIsSigningDeployment(false)
+    }
+  }
+
+  async function handleDeploymentRefresh() {
+    if (!PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
+      setDeploymentError(PROGRAM_DEPLOYMENT_DISABLED_MESSAGE)
+      return
+    }
+
+    if (!mvpState.deploymentJob || isRefreshingDeploymentStatus) {
+      return
+    }
+
+    setDeploymentError(null)
+    setIsRefreshingDeploymentStatus(true)
+
+    try {
+      const job = await readDeploymentJobStatus({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        job: mvpState.deploymentJob,
+      })
+
+      setMvpState((currentState) => saveDeploymentJob(currentState, job))
+    } finally {
+      setIsRefreshingDeploymentStatus(false)
     }
   }
 
@@ -516,22 +887,16 @@ export function SpecDrivenApp() {
             walletConnected={Boolean(account)}
           />
 
-          <ScrollView
-            key={screenKey}
-            className="mt-4 min-h-0 flex-1"
-            contentContainerStyle={{ flexGrow: 1, gap: 14, paddingBottom: activeTab === 'chat' ? 0 : 4 }}
-            showsVerticalScrollIndicator={false}
-          >
-            {walletError ? (
-              <Text
-                numberOfLines={2}
-                className="rounded-lg border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-xs font-semibold leading-4 text-[#ffd2bd]"
-              >
-                {walletError}
-              </Text>
-            ) : null}
-
-            {activeTab === 'chat' ? (
+          {activeTab === 'chat' ? (
+            <View key={screenKey} className="mt-4 min-h-0 flex-1 gap-3">
+              {walletError ? (
+                <Text
+                  numberOfLines={2}
+                  className="rounded-lg border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-xs font-semibold leading-4 text-[#ffd2bd]"
+                >
+                  {walletError}
+                </Text>
+              ) : null}
               <ChatView
                 draft={draft}
                 followUpDraft={followUpDraft}
@@ -539,6 +904,7 @@ export function SpecDrivenApp() {
                 hasDesignDoc={Boolean(mvpState.designDoc)}
                 isSendingFollowUp={isSendingFollowUp}
                 messages={mvpState.messages}
+                pendingRouteConfirmation={pendingRouteConfirmation}
                 selectedSuggestion={selectedSuggestion}
                 suggestionCount={mvpState.suggestions.length}
                 suggestionPage={normalizedSuggestionPage}
@@ -546,53 +912,101 @@ export function SpecDrivenApp() {
                 onBackFromSuggestion={() => setSelectedSuggestion(null)}
                 onChangeDraft={setDraft}
                 onChangeFollowUpDraft={setFollowUpDraft}
+                onClearChat={handleClearChat}
+                onConfirmExistingProjectRoute={handleConfirmExistingProjectRoute}
                 onFollowUpSend={handleFollowUpSend}
                 onNextSuggestions={showNextSuggestions}
                 onPreviousSuggestions={showPreviousSuggestions}
                 onReviewDesignDoc={handleReviewDesignDoc}
                 onSendMessage={handleSendMessage}
+                onStartNewProjectRoute={handleStartNewProjectRoute}
                 onSuggestionPress={handleSuggestionPress}
               />
-            ) : null}
+            </View>
+          ) : (
+            <ScrollView
+              key={screenKey}
+              ref={workspaceScrollRef}
+              className="mt-4 min-h-0 flex-1"
+              contentContainerStyle={{ flexGrow: 1, gap: 14, paddingBottom: 4 }}
+              showsVerticalScrollIndicator={false}
+            >
+              {walletError ? (
+                <Text
+                  numberOfLines={2}
+                  className="rounded-lg border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-xs font-semibold leading-4 text-[#ffd2bd]"
+                >
+                  {walletError}
+                </Text>
+              ) : null}
 
-            {activeTab === 'workspace' ? (
-              <WorkspaceView
-                accountAddress={accountAddress}
-                appSettings={appSettings}
-                designDoc={mvpState.designDoc}
-                designDocApprovedAt={mvpState.designDocApprovedAt}
-                latestPromptSeed={mvpState.latestPromptSeed}
-                mode={displayMode}
-                verificationProperties={mvpState.verificationProperties}
-                verificationPropertiesApprovedAt={mvpState.verificationPropertiesApprovedAt}
-                workflowMode={mvpState.workflowMode}
-                walletConnected={Boolean(account)}
-                generationError={generationError}
-                generationJob={mvpState.generationJob}
-                isApplyingVibeDefaults={isApplyingVibeDefaults}
-                isRefreshingGenerationStatus={isRefreshingGenerationStatus}
-                isSubmittingGeneration={isSubmittingGeneration}
-                onAppSettingChange={updateAppSetting}
-                onApproveDesignDoc={handleApproveDesignDoc}
-                onApproveVerificationProperties={handleApproveVerificationProperties}
-                onDesignDocFieldChange={(field, value) =>
-                  setMvpState((currentState) => updateDesignDocField(currentState, field, value))
-                }
-                onDesignDocListFieldChange={(field, value) =>
-                  setMvpState((currentState) => updateDesignDocListField(currentState, field, value))
-                }
-                onGenerationSubmit={handleGenerationSubmit}
-                onGenerationRefresh={handleGenerationRefresh}
-                onApplyVibeDefaults={handleApplyVibeDefaults}
-                onModeChange={handleModeChange}
-                onWalletPress={handleWalletPress}
-              />
-            ) : null}
+              {activeTab === 'workspace' ? (
+                <WorkspaceView
+                  accountAddress={accountAddress}
+                  appSettings={appSettings}
+                  designDoc={mvpState.designDoc}
+                  designDocApprovedAt={mvpState.designDocApprovedAt}
+                  deploymentError={deploymentError}
+                  deploymentJob={mvpState.deploymentJob}
+                  latestPromptSeed={mvpState.latestPromptSeed}
+                  mode={displayMode}
+                  verificationProperties={mvpState.verificationProperties}
+                  verificationPropertiesApprovedAt={mvpState.verificationPropertiesApprovedAt}
+                  workflowMode={mvpState.workflowMode}
+                  walletConnected={Boolean(account)}
+                  generationError={generationError}
+                  generationJob={mvpState.generationJob}
+                  cvlrError={cvlrError}
+                  cvlrSpec={mvpState.cvlrSpec}
+                  cvlrSpecApprovedAt={mvpState.cvlrSpecApprovedAt}
+                  isApprovingCvlrSpec={isApprovingCvlrSpec}
+                  isApplyingVibeDefaults={isApplyingVibeDefaults}
+                  isGeneratingCvlrSpec={isGeneratingCvlrSpec}
+                  isRefreshingDeploymentStatus={isRefreshingDeploymentStatus}
+                  isRefreshingGenerationStatus={isRefreshingGenerationStatus}
+                  isSigningDeployment={isSigningDeployment}
+                  isSubmittingDeployment={isSubmittingDeployment}
+                  isSubmittingGeneration={isSubmittingGeneration}
+                  approvedDesignDocSections={approvedDesignDocSections}
+                  onAppSettingChange={updateAppSetting}
+                  onApproveDesignDoc={handleApproveDesignDoc}
+                  onApproveDesignDocSection={handleApproveDesignDocSection}
+                  onApproveVerificationProperties={handleApproveVerificationProperties}
+                  onDesignDocFieldChange={handleDesignDocFieldChange}
+                  onDesignDocSectionLayout={handleDesignDocSectionLayout}
+                  onDesignDocListFieldChange={handleDesignDocListFieldChange}
+                  onDiscussDesignDocSection={handleDiscussDesignDocSection}
+                  onApproveCvlrSpec={handleApproveCvlrSpec}
+                  onGenerateCvlrSpec={handleGenerateCvlrSpec}
+                  onGenerationSubmit={handleGenerationSubmit}
+                  onGenerationRefresh={handleGenerationRefresh}
+                  onDeploymentRefresh={handleDeploymentRefresh}
+                  onGoToWorkspaceCard={handleGoToWorkspaceCard}
+                  onWorkspaceCardLayout={handleWorkspaceCardLayout}
+                  onDeploymentSign={handleDeploymentSign}
+                  onDeploymentStart={handleDeploymentStart}
+                  isPublishing={isPublishing}
+                  publishedAt={mvpState.publishedAt}
+                  onApplyVibeDefaults={handleApplyVibeDefaults}
+                  onModeChange={handleModeChange}
+                  onPublish={handlePublish}
+                  onSuggestProperty={handleSuggestProperty}
+                  onWalletPress={handleWalletPress}
+                />
+              ) : null}
 
-            {activeTab === 'explore' ? (
-              <ExploreView exploreTab={exploreTab} onExploreTabChange={setExploreTab} />
-            ) : null}
-          </ScrollView>
+              {activeTab === 'explore' ? (
+                <ExploreView
+                  exploreTab={exploreTab}
+                  onExploreTabChange={setExploreTab}
+                  projectTitle={mvpState.designDoc?.title ?? null}
+                  projectSummary={mvpState.designDoc?.goal ?? null}
+                  publishedAt={mvpState.publishedAt}
+                  verificationProperties={mvpState.verificationProperties}
+                />
+              ) : null}
+            </ScrollView>
+          )}
 
           <View className={activeTab === 'chat' ? 'mt-0' : 'mt-4'}>
             <BottomNav activeTab={activeTab} onChangeTab={setActiveTab} />
@@ -655,6 +1069,7 @@ function ChatView({
   hasDesignDoc,
   isSendingFollowUp,
   messages,
+  pendingRouteConfirmation,
   selectedSuggestion,
   suggestionCount,
   suggestionPage,
@@ -662,11 +1077,14 @@ function ChatView({
   onBackFromSuggestion,
   onChangeDraft,
   onChangeFollowUpDraft,
+  onClearChat,
+  onConfirmExistingProjectRoute,
   onFollowUpSend,
   onNextSuggestions,
   onPreviousSuggestions,
   onReviewDesignDoc,
   onSendMessage,
+  onStartNewProjectRoute,
   onSuggestionPress,
 }: {
   draft: string
@@ -675,6 +1093,7 @@ function ChatView({
   hasDesignDoc: boolean
   isSendingFollowUp: boolean
   messages: ChatMessage[]
+  pendingRouteConfirmation: PendingRouteConfirmation | null
   selectedSuggestion: Suggestion | null
   suggestionCount: number
   suggestionPage: number
@@ -682,11 +1101,14 @@ function ChatView({
   onBackFromSuggestion: () => void
   onChangeDraft: (value: string) => void
   onChangeFollowUpDraft: (value: string) => void
+  onClearChat: () => void
+  onConfirmExistingProjectRoute: () => void
   onFollowUpSend: () => void
   onNextSuggestions: () => void
   onPreviousSuggestions: () => void
   onReviewDesignDoc: () => void
   onSendMessage: () => void
+  onStartNewProjectRoute: () => void
   onSuggestionPress: (suggestion: Suggestion) => void
 }) {
   if (selectedSuggestion) {
@@ -706,13 +1128,60 @@ function ChatView({
   const hasUserPrompt = messages.some((message) => message.side === 'user')
 
   return (
-    <View className="flex-1 justify-between gap-3">
-      <View className="gap-3">
+    <View className="min-h-0 flex-1 gap-3">
+      <View className="flex-row items-center justify-between gap-3">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Project chat</Text>
+        <Pressable
+          accessibilityRole="button"
+          onPress={onClearChat}
+          className="rounded-full border border-[#fff4cf]/15 bg-[#fff4cf]/10 px-4 py-2 active:bg-[#fff4cf]/15"
+        >
+          <Text className="text-xs font-black text-[#fff4cf]">Clear</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView
+        className="min-h-0 flex-1"
+        contentContainerStyle={{ gap: 12, paddingBottom: 4 }}
+        showsVerticalScrollIndicator={false}
+      >
         <View className="gap-2">
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
         </View>
+
+        {pendingRouteConfirmation ? (
+          <View className="gap-3 rounded-lg border border-[#ffd978]/30 bg-[#ffd978]/10 p-3">
+            <View className="gap-1">
+              <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Related project found</Text>
+              <Text className="text-base font-black text-[#fff4cf]">{pendingRouteConfirmation.project.title}</Text>
+              <Text className="text-sm leading-5 text-[#fff4cf]/70">
+                Continue this chat in that project, or start a separate project?
+              </Text>
+            </View>
+            <View className="flex-row gap-2">
+              <Pressable
+                accessibilityLabel="Continue related project"
+                accessibilityRole="button"
+                onPress={onConfirmExistingProjectRoute}
+                testID="related-project-continue"
+                className="flex-1 rounded-full bg-[#ffd978] px-4 py-2 active:bg-[#ffe6a3]"
+              >
+                <Text className="text-center text-xs font-black text-[#201626]">Continue</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Start new project"
+                accessibilityRole="button"
+                onPress={onStartNewProjectRoute}
+                testID="related-project-new"
+                className="flex-1 rounded-full border border-[#fff4cf]/15 bg-[#fff4cf]/10 px-4 py-2 active:bg-[#fff4cf]/15"
+              >
+                <Text className="text-center text-xs font-black text-[#fff4cf]">New project</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {hasDesignDoc ? (
           <View className="gap-3 rounded-lg border border-[#9db4ff]/25 bg-[#9db4ff]/10 p-3">
@@ -738,11 +1207,15 @@ function ChatView({
         {hasUserPrompt && suggestionCount > 0 ? (
           <View className="gap-2">
             <View className="flex-row items-center justify-between gap-3">
-              <Text numberOfLines={1} className="min-w-0 flex-1 text-xs font-bold uppercase tracking-wide text-[#ffd978]">
+              <Text
+                numberOfLines={1}
+                className="min-w-0 flex-1 text-xs font-bold uppercase tracking-wide text-[#ffd978]"
+              >
                 Suggestions
               </Text>
               <Text className="text-xs font-bold text-[#fff4cf]/55">
-                {suggestionPage * 2 + 1}-{Math.min(suggestionPage * 2 + visibleSuggestions.length, suggestionCount)} of {suggestionCount}
+                {suggestionPage * 2 + 1}-{Math.min(suggestionPage * 2 + visibleSuggestions.length, suggestionCount)} of{' '}
+                {suggestionCount}
               </Text>
             </View>
             <View className="flex-row items-stretch gap-2">
@@ -767,7 +1240,7 @@ function ChatView({
             </View>
           </View>
         ) : null}
-      </View>
+      </ScrollView>
 
       <Composer
         draft={draft}
@@ -797,8 +1270,12 @@ function SuggestionFollowUpView({
   onSend: () => void
 }) {
   return (
-    <View className="flex-1 justify-between gap-4">
-      <View className="gap-4">
+    <View className="min-h-0 flex-1 gap-4">
+      <ScrollView
+        className="min-h-0 flex-1"
+        contentContainerStyle={{ gap: 16, paddingBottom: 4 }}
+        showsVerticalScrollIndicator={false}
+      >
         <View className="flex-row items-center justify-between gap-3">
           <Pressable
             accessibilityRole="button"
@@ -827,7 +1304,7 @@ function SuggestionFollowUpView({
             {note}
           </Text>
         ) : null}
-      </View>
+      </ScrollView>
 
       <Composer
         draft={draft}
@@ -840,7 +1317,13 @@ function SuggestionFollowUpView({
   )
 }
 
-function ModeSwitch({ mode, onModeChange }: { mode: DisplayWorkflowMode; onModeChange: (value: DisplayWorkflowMode) => void }) {
+function ModeSwitch({
+  mode,
+  onModeChange,
+}: {
+  mode: DisplayWorkflowMode
+  onModeChange: (value: DisplayWorkflowMode) => void
+}) {
   return (
     <View className="flex-row rounded-full border border-[#fff4cf]/10 bg-[#fff4cf]/10 p-1">
       {(['Vibe', 'Pro'] as DisplayWorkflowMode[]).map((option) => {
@@ -916,6 +1399,7 @@ function Composer({
       </Pressable>
       <TextInput
         className="min-h-9 min-w-0 flex-1 px-1 py-2 text-sm font-semibold leading-5 text-[#fff4cf]"
+        accessibilityLabel="Project prompt input"
         blurOnSubmit={false}
         editable={!isSending}
         multiline
@@ -926,6 +1410,7 @@ function Composer({
         returnKeyType="send"
         style={{ maxHeight: 112, textAlignVertical: 'top' }}
         submitBehavior="submit"
+        testID="project-prompt-input"
         value={draft}
       />
       <Pressable
@@ -933,6 +1418,7 @@ function Composer({
         accessibilityRole="button"
         disabled={!canSend}
         onPress={onSend}
+        testID="send-message-button"
         className={`h-9 w-9 items-center justify-center rounded-full ${canSend ? 'bg-[#ffd978] active:bg-[#ffe6a3]' : 'bg-[#fff4cf]/20'}`}
       >
         <SendArrowIcon />
@@ -964,145 +1450,232 @@ function MicIcon() {
 function WorkspaceView({
   accountAddress,
   appSettings,
+  approvedDesignDocSections,
+  cvlrError,
+  cvlrSpec,
+  cvlrSpecApprovedAt,
   designDoc,
   designDocApprovedAt,
+  deploymentError,
+  deploymentJob,
   generationError,
   generationJob,
-  isRefreshingGenerationStatus,
-  isSubmittingGeneration,
+  isApprovingCvlrSpec,
   isApplyingVibeDefaults,
+  isGeneratingCvlrSpec,
+  isPublishing,
+  isRefreshingDeploymentStatus,
+  isRefreshingGenerationStatus,
+  isSigningDeployment,
+  isSubmittingDeployment,
+  isSubmittingGeneration,
   latestPromptSeed,
   mode,
+  publishedAt,
   verificationProperties,
   verificationPropertiesApprovedAt,
   workflowMode,
   onAppSettingChange,
+  onApproveCvlrSpec,
   onApplyVibeDefaults,
   onApproveDesignDoc,
+  onApproveDesignDocSection,
   onApproveVerificationProperties,
   onDesignDocFieldChange,
+  onDesignDocSectionLayout,
   onDesignDocListFieldChange,
+  onDiscussDesignDocSection,
+  onDeploymentRefresh,
+  onDeploymentSign,
+  onDeploymentStart,
+  onGenerateCvlrSpec,
   onGenerationRefresh,
   onGenerationSubmit,
+  onGoToWorkspaceCard,
   onModeChange,
+  onPublish,
+  onSuggestProperty,
   onWalletPress,
+  onWorkspaceCardLayout,
   walletConnected,
 }: {
   accountAddress?: string
   appSettings: AppSettings
+  approvedDesignDocSections: DesignDocSectionKey[]
   designDoc: MvpDesignDoc | null
   designDocApprovedAt: string | null
+  deploymentError: string | null
+  deploymentJob: DeploymentJobRecord | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
+  cvlrError: string | null
+  cvlrSpec: CvlrSpec | null
+  cvlrSpecApprovedAt: string | null
+  isApprovingCvlrSpec: boolean
   isApplyingVibeDefaults: boolean
+  isGeneratingCvlrSpec: boolean
+  isPublishing: boolean
+  isRefreshingDeploymentStatus: boolean
   isRefreshingGenerationStatus: boolean
+  isSigningDeployment: boolean
+  isSubmittingDeployment: boolean
   isSubmittingGeneration: boolean
   latestPromptSeed: MvpProjectSeed | null
   mode: DisplayWorkflowMode
+  publishedAt: string | null
   verificationProperties: VerificationProperty[]
   verificationPropertiesApprovedAt: string | null
   workflowMode: WorkflowMode
   onAppSettingChange: (key: keyof AppSettings, value: string) => void
+  onApproveCvlrSpec: () => void
   onApplyVibeDefaults: () => void
   onApproveDesignDoc: () => void
+  onApproveDesignDocSection: (sectionKey: DesignDocSectionKey) => void
   onApproveVerificationProperties: () => void
   onDesignDocFieldChange: (field: 'title' | 'goal', value: string) => void
-  onDesignDocListFieldChange: (
-    field: 'coreRequirements' | 'assumptions' | 'missingInformation',
-    value: string
-  ) => void
+  onDesignDocSectionLayout: (target: DesignDocScrollTarget, y: number) => void
+  onDesignDocListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
+  onDiscussDesignDocSection: (section: { key: DesignDocSectionKey; label: string; value: string }) => void
+  onDeploymentRefresh: () => void
+  onDeploymentSign: () => void
+  onDeploymentStart: () => void
+  onGenerateCvlrSpec: () => void
   onGenerationRefresh: () => void
   onGenerationSubmit: () => void
+  onGoToWorkspaceCard: (target: WorkspaceCardTarget) => void
   onModeChange: (value: DisplayWorkflowMode) => void
+  onPublish: () => void
+  onSuggestProperty: (text: string) => void
   onWalletPress: () => void
+  onWorkspaceCardLayout: (target: WorkspaceCardTarget, y: number) => void
   walletConnected: boolean
 }) {
   return (
     <View className="gap-4">
-      <View className="gap-3 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-4">
-        <View className="flex-row items-start justify-between gap-3">
-          <View className="min-w-0 flex-1">
-            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Project request</Text>
-            <Text className="mt-1 text-xl font-black leading-6 text-[#dffdf4]">
-              {latestPromptSeed ? 'Ready for Design Doc review' : 'Waiting for your first request'}
-            </Text>
-          </View>
-          <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
-            <Text className="text-xs font-black text-[#dffdf4]">{latestPromptSeed ? 'Captured' : 'Empty'}</Text>
-          </View>
-        </View>
-        <Text className="text-sm leading-6 text-[#dffdf4]/80">
-          {latestPromptSeed
-            ? latestPromptSeed.prompt
-            : 'Describe what you want to build in Chat. Workspace will show the Design Doc once the backend drafts it.'}
-        </Text>
-      </View>
-
-      <DesignDocCard
-        approvedAt={designDocApprovedAt}
+      <SuggestedNextActionCard
+        cvlrSpec={cvlrSpec}
+        cvlrSpecApprovedAt={cvlrSpecApprovedAt}
+        deploymentJob={deploymentJob}
         designDoc={designDoc}
-        generationError={generationError}
-        generationJob={generationJob}
-        isApplyingVibeDefaults={isApplyingVibeDefaults}
-        isRefreshingGenerationStatus={isRefreshingGenerationStatus}
-        isSubmittingGeneration={isSubmittingGeneration}
-        propertiesApprovedAt={verificationPropertiesApprovedAt}
-        workflowMode={workflowMode}
-        onApplyVibeDefaults={onApplyVibeDefaults}
-        onApprove={onApproveDesignDoc}
-        onFieldChange={onDesignDocFieldChange}
-        onRefresh={onGenerationRefresh}
-        onGenerate={onGenerationSubmit}
-        onListFieldChange={onDesignDocListFieldChange}
-      />
-
-      <PropertiesToProveCard
         designDocApprovedAt={designDocApprovedAt}
-        properties={verificationProperties}
-        propertiesApprovedAt={verificationPropertiesApprovedAt}
-        onApprove={onApproveVerificationProperties}
+        generationJob={generationJob}
+        publishedAt={publishedAt}
+        verificationProperties={verificationProperties}
+        verificationPropertiesApprovedAt={verificationPropertiesApprovedAt}
+        onGoToCard={onGoToWorkspaceCard}
       />
 
-      <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
-        <View className="flex-row items-start justify-between gap-3">
-          <View className="min-w-0 flex-1 gap-1">
-            <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Suggested next action</Text>
-            <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Choose pause authority</Text>
-            <Text className="text-sm leading-6 text-[#fff4cf]/70">
-              Highest-value project action across the workspace. Resolving this unlocks generation for Escrow Lens.
-            </Text>
-          </View>
-          <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
-            <Text className="text-xs font-black text-[#ffe6a3]">Top</Text>
-          </View>
-        </View>
-
-        <View className="flex-row gap-2">
-          <MiniDecisionCard label="Option A" title="Buyer pauses" body="Fast unblock" />
-          <MiniDecisionCard label="Option B" title="Mutual pause" body="Safer default" />
-        </View>
-
-        <StageRow activeStage="Props" />
+      <View onLayout={(event) => onWorkspaceCardLayout('design-doc', event.nativeEvent.layout.y)}>
+        <DesignDocCard
+          approvedAt={designDocApprovedAt}
+          approvedSections={approvedDesignDocSections}
+          designDoc={designDoc}
+          generationError={generationError}
+          generationJob={generationJob}
+          isApplyingVibeDefaults={isApplyingVibeDefaults}
+          isRefreshingGenerationStatus={isRefreshingGenerationStatus}
+          isSubmittingGeneration={isSubmittingGeneration}
+          propertiesApprovedAt={verificationPropertiesApprovedAt}
+          workflowMode={workflowMode}
+          onApplyVibeDefaults={onApplyVibeDefaults}
+          onApprove={onApproveDesignDoc}
+          onApproveSection={onApproveDesignDocSection}
+          onDiscussSection={onDiscussDesignDocSection}
+          onFieldChange={onDesignDocFieldChange}
+          onSectionLayout={onDesignDocSectionLayout}
+          onRefresh={onGenerationRefresh}
+          onGenerate={onGenerationSubmit}
+          onListFieldChange={onDesignDocListFieldChange}
+        />
       </View>
 
-      <View className="gap-3">
-        <SectionTitle title="Your projects" badge="3 active" />
-        {projects.map((project) => (
-          <View key={project.name} className="gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
-            <View className="flex-row items-start justify-between gap-3">
-              <View className="min-w-0 flex-1">
-                <Text className="text-lg font-black text-[#fff4cf]">{project.name}</Text>
-                <Text className="text-sm leading-5 text-[#fff4cf]/65">{project.summary}</Text>
-                <Text className="mt-1 text-xs leading-5 text-[#fff4cf]/50">{project.assurance}</Text>
-              </View>
-              <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
-                <Text className="text-xs font-black text-[#ffe6a3]">{project.badge}</Text>
-              </View>
+      <View onLayout={(event) => onWorkspaceCardLayout('properties', event.nativeEvent.layout.y)}>
+        <PropertiesToProveCard
+          designDocApprovedAt={designDocApprovedAt}
+          properties={verificationProperties}
+          propertiesApprovedAt={verificationPropertiesApprovedAt}
+          onApprove={onApproveVerificationProperties}
+        />
+      </View>
+
+      <View onLayout={(event) => onWorkspaceCardLayout('cvlr-spec', event.nativeEvent.layout.y)}>
+        <CvlrSpecCard
+          cvlrSpec={cvlrSpec}
+          cvlrSpecApprovedAt={cvlrSpecApprovedAt}
+          error={cvlrError}
+          isApproving={isApprovingCvlrSpec}
+          isGenerating={isGeneratingCvlrSpec}
+          verificationPropertiesApprovedAt={verificationPropertiesApprovedAt}
+          onApprove={onApproveCvlrSpec}
+          onGenerate={onGenerateCvlrSpec}
+        />
+      </View>
+
+      <View onLayout={(event) => onWorkspaceCardLayout('daily-property', event.nativeEvent.layout.y)}>
+        <DailyPropertyCard designDocApprovedAt={designDocApprovedAt} onSuggestProperty={onSuggestProperty} />
+      </View>
+
+      {PROGRAM_DEPLOYMENT_FLOW_ENABLED ? (
+        <>
+          <View onLayout={(event) => onWorkspaceCardLayout('deployment', event.nativeEvent.layout.y)}>
+            <DeploymentCard
+              accountAddress={accountAddress}
+              deploymentError={deploymentError}
+              deploymentJob={deploymentJob}
+              generationJob={generationJob}
+              isRefreshingDeploymentStatus={isRefreshingDeploymentStatus}
+              isSigningDeployment={isSigningDeployment}
+              isSubmittingDeployment={isSubmittingDeployment}
+              walletConnected={walletConnected}
+              onRefresh={onDeploymentRefresh}
+              onSign={onDeploymentSign}
+              onStart={onDeploymentStart}
+            />
+          </View>
+
+          <ProgramHealthCard deploymentJob={deploymentJob} />
+        </>
+      ) : (
+        <ProgramDeploymentDisabledCard />
+      )}
+
+      {designDoc ? (
+        <View
+          className="gap-3 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-4"
+          onLayout={(event) => onWorkspaceCardLayout('publish', event.nativeEvent.layout.y)}
+        >
+          <View className="flex-row items-start justify-between gap-3">
+            <View className="min-w-0 flex-1 gap-1">
+              <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Publish to Explore</Text>
+              <Text className="text-xl font-black leading-6 text-[#dffdf4]">
+                {publishedAt ? 'Project is published' : 'Share with the community'}
+              </Text>
+              <Text className="text-sm leading-5 text-[#dffdf4]/70">
+                {publishedAt
+                  ? 'Your project title and verification properties are visible in the Explore tab.'
+                  : 'Opt in to make your project title and verification properties visible to other builders in the Explore tab.'}
+              </Text>
             </View>
-            <StageRow activeStage={project.stage} compact />
+            <View className={`rounded-full px-3 py-2 ${publishedAt ? 'bg-[#75e6be]/25' : 'bg-[#75e6be]/15'}`}>
+              <Text className="text-xs font-black text-[#adf7e6]">{publishedAt ? 'Live' : 'Off'}</Text>
+            </View>
           </View>
-        ))}
-      </View>
+          {!publishedAt ? (
+            <Pressable
+              accessibilityLabel="Publish project"
+              accessibilityRole="button"
+              disabled={isPublishing}
+              onPress={onPublish}
+              testID="publish-project-button"
+              className="rounded-lg bg-[#75e6be] px-4 py-3 active:bg-[#adf7e6]"
+            >
+              <Text className="text-center text-sm font-black text-[#0d3b35]">
+                {isPublishing ? 'Publishing…' : 'Publish project'}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       <View className="gap-3">
         <SectionTitle title="Settings and integrations" badge={walletConnected ? 'Wallet on' : 'Wallet off'} />
@@ -1127,34 +1700,37 @@ function WorkspaceView({
           onAction={onWalletPress}
         />
         <Text className="rounded-lg border border-[#fff4cf]/10 bg-[#fff4cf]/5 px-3 py-2 text-xs leading-5 text-[#fff4cf]/55">
-          Integration values entered here are held in local app state only. Backend credential storage and account
-          linking are not connected in this template yet.
+          These integrations are shown for future setup. They are disabled until the app has a working backend flow that
+          uses them.
         </Text>
         <EditableSettingRow
-          body="Used to associate generated app builds with the right Expo identity once backend linking exists."
+          body="Expo account linking is not connected in this build."
+          disabled
           onChangeText={(value) => onAppSettingChange('expoAccount', value)}
           placeholder="expo username or email"
           title="Expo account"
           value={appSettings.expoAccount}
-          status={appSettings.expoAccount.trim() ? 'Entered' : 'Not linked'}
+          status="Not active"
         />
         <EditableSettingRow
-          body="Required for backend-triggered non-interactive EAS CLI jobs. Paste an EXPO_TOKEN or mark the EAS auth state."
+          body="EAS authentication is not used by the current app flow."
+          disabled
           onChangeText={(value) => onAppSettingChange('easAuth', value)}
           placeholder="EXPO_TOKEN or EAS auth note"
           secureTextEntry
           title="EXPO_TOKEN / EAS auth"
           value={appSettings.easAuth}
-          status={appSettings.easAuth.trim() ? 'Saved locally' : 'Missing'}
+          status="Not active"
         />
         <EditableSettingRow
-          body="Needed before deeper verification jobs can be queued from Spec-Driven."
+          body="Certora access is not used by the current app flow."
+          disabled
           onChangeText={(value) => onAppSettingChange('certoraApiKey', value)}
           placeholder="Certora API key"
           secureTextEntry
           title="Certora API key"
           value={appSettings.certoraApiKey}
-          status={appSettings.certoraApiKey.trim() ? 'Saved locally' : 'Missing'}
+          status="Not active"
         />
       </View>
     </View>
@@ -1187,6 +1763,24 @@ function getGenerationStatusBadgeClass(status: string) {
   }
 }
 
+function getDeploymentStatusBadgeClass(status: string) {
+  switch (getDeploymentStatusLabel(status)) {
+    case 'Queued':
+      return 'bg-[#9db4ff]/18'
+    case 'Running':
+      return 'bg-[#ffd978]/18'
+    case 'Signature needed':
+      return 'bg-[#ffd978]/20'
+    case 'Succeeded':
+      return 'bg-[#75e6be]/15'
+    case 'Failed':
+      return 'bg-[#ff8a5c]/18'
+    case 'Unavailable':
+    default:
+      return 'bg-[#7a8197]/25'
+  }
+}
+
 function isActiveGenerationJob(status: string) {
   return status === 'queued' || status === 'running'
 }
@@ -1203,6 +1797,7 @@ function formatShortIdentifier(value: string | null | undefined) {
 
 function DesignDocCard({
   approvedAt,
+  approvedSections,
   designDoc,
   generationError,
   generationJob,
@@ -1213,12 +1808,16 @@ function DesignDocCard({
   workflowMode,
   onApplyVibeDefaults,
   onApprove,
+  onApproveSection,
+  onDiscussSection,
   onFieldChange,
+  onSectionLayout,
   onRefresh,
   onGenerate,
   onListFieldChange,
 }: {
   approvedAt: string | null
+  approvedSections: DesignDocSectionKey[]
   designDoc: MvpDesignDoc | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
@@ -1229,7 +1828,10 @@ function DesignDocCard({
   workflowMode: WorkflowMode
   onApplyVibeDefaults: () => void
   onApprove: () => void
+  onApproveSection: (sectionKey: DesignDocSectionKey) => void
+  onDiscussSection: (section: { key: DesignDocSectionKey; label: string; value: string }) => void
   onFieldChange: (field: 'title' | 'goal', value: string) => void
+  onSectionLayout: (target: DesignDocScrollTarget, y: number) => void
   onRefresh: () => void
   onGenerate: () => void
   onListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
@@ -1239,7 +1841,7 @@ function DesignDocCard({
   const generationBlocked = isSubmittingGeneration || hasMissingInformation || !approvedAt || !propertiesApprovedAt
   const modeLabel = toDisplayWorkflowMode(workflowMode)
   const generationButtonLabel = isSubmittingGeneration
-    ? 'Submitting to backend...'
+    ? 'Submitting to Certora Prover...'
     : hasMissingInformation
       ? 'Resolve gate before generation'
       : !approvedAt
@@ -1247,6 +1849,50 @@ function DesignDocCard({
         : !propertiesApprovedAt
           ? 'Approve properties first'
           : 'Generate MVP'
+  const sections: {
+    key: DesignDocSectionKey
+    label: string
+    multiline?: boolean
+    value: string
+    onChangeText: (value: string) => void
+  }[] = designDoc
+    ? [
+        {
+          key: 'title',
+          label: 'Title',
+          value: designDoc.title,
+          onChangeText: (value) => onFieldChange('title', value),
+        },
+        {
+          key: 'goal',
+          label: 'Goal',
+          multiline: true,
+          value: designDoc.goal,
+          onChangeText: (value) => onFieldChange('goal', value),
+        },
+        {
+          key: 'coreRequirements',
+          label: 'Core requirements',
+          multiline: true,
+          value: designDoc.coreRequirements.join('\n'),
+          onChangeText: (value) => onListFieldChange('coreRequirements', value),
+        },
+        {
+          key: 'assumptions',
+          label: 'Assumptions',
+          multiline: true,
+          value: designDoc.assumptions.join('\n'),
+          onChangeText: (value) => onListFieldChange('assumptions', value),
+        },
+        {
+          key: 'missingInformation',
+          label: 'Missing information',
+          multiline: true,
+          value: designDoc.missingInformation.join('\n'),
+          onChangeText: (value) => onListFieldChange('missingInformation', value),
+        },
+      ]
+    : []
 
   if (!designDoc) {
     return (
@@ -1277,35 +1923,19 @@ function DesignDocCard({
         </View>
       </View>
 
-      <EditableDocField
-        label="Title"
-        value={designDoc.title}
-        onChangeText={(value) => onFieldChange('title', value)}
-      />
-      <EditableDocField
-        label="Goal"
-        multiline
-        value={designDoc.goal}
-        onChangeText={(value) => onFieldChange('goal', value)}
-      />
-      <EditableDocField
-        label="Core requirements"
-        multiline
-        value={designDoc.coreRequirements.join('\n')}
-        onChangeText={(value) => onListFieldChange('coreRequirements', value)}
-      />
-      <EditableDocField
-        label="Assumptions"
-        multiline
-        value={designDoc.assumptions.join('\n')}
-        onChangeText={(value) => onListFieldChange('assumptions', value)}
-      />
-      <EditableDocField
-        label="Missing information"
-        multiline
-        value={designDoc.missingInformation.join('\n')}
-        onChangeText={(value) => onListFieldChange('missingInformation', value)}
-      />
+      {sections.map((section) => (
+        <View key={section.key} onLayout={(event) => onSectionLayout(section.key, event.nativeEvent.layout.y)}>
+          <EditableDocField
+            approved={approvedSections.includes(section.key)}
+            label={section.label}
+            multiline={section.multiline}
+            value={section.value}
+            onApprove={() => onApproveSection(section.key)}
+            onChangeText={section.onChangeText}
+            onDiscuss={() => onDiscussSection(section)}
+          />
+        </View>
+      ))}
 
       {hasMissingInformation ? (
         <View className="gap-3 rounded-2xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 p-3">
@@ -1331,14 +1961,17 @@ function DesignDocCard({
         </View>
       ) : null}
 
-      <View className="gap-3 rounded-2xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+      <View
+        className="gap-3 rounded-2xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3"
+        onLayout={(event) => onSectionLayout('approval', event.nativeEvent.layout.y)}
+      >
         <View className="flex-row items-start justify-between gap-3">
           <View className="min-w-0 flex-1 gap-1">
             <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Approval</Text>
             <Text className="text-sm leading-5 text-[#dffdf4]/80">
               {approvedAt
                 ? `Approved ${formatSavedAt(approvedAt)}. Editing the Design Doc will reset this approval.`
-                : 'Approve this Design Doc to propose properties and invariants before CVLR generation.'}
+                : 'Approve this Design Doc when the plan looks right. After approval, the app can suggest the specifications for formal verification.'}
             </Text>
           </View>
           {approvedAt ? (
@@ -1364,7 +1997,7 @@ function DesignDocCard({
           <View className="min-w-0 flex-1 gap-1">
             <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation submission</Text>
             <Text className="text-sm leading-5 text-[#eef2ff]/70">
-              Submit this MVP Design Doc to the local backend at `10.0.2.2:8000` as one AI Composer generation job.
+              Submit this MVP Design Doc to Certora Prover for formal verification.
             </Text>
           </View>
           <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob?.status ?? 'ready')}`}>
@@ -1390,7 +2023,9 @@ function DesignDocCard({
             {generationJob.progressSummary ? (
               <Text className="text-xs leading-5 text-[#dffdf4]/70">Progress: {generationJob.progressSummary}</Text>
             ) : null}
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">
+              Updated: {formatSavedAt(generationJob.updatedAt)}
+            </Text>
             {generationJob.lastHeartbeatAt ? (
               <Text className="text-xs leading-5 text-[#dffdf4]/70">
                 Worker heartbeat: {formatSavedAt(generationJob.lastHeartbeatAt)}
@@ -1465,6 +2100,395 @@ function DesignDocCard({
   )
 }
 
+function deriveSuggestedNextAction(props: {
+  designDoc: MvpDesignDoc | null
+  designDocApprovedAt: string | null
+  verificationProperties: VerificationProperty[]
+  verificationPropertiesApprovedAt: string | null
+  cvlrSpec: CvlrSpec | null
+  cvlrSpecApprovedAt: string | null
+  generationJob: GenerationJobRecord | null
+  deploymentJob: DeploymentJobRecord | null
+  publishedAt: string | null
+}): { eyebrow: string; title: string; body: string; target: WorkspaceCardTarget } {
+  if (!props.designDoc) {
+    return {
+      eyebrow: 'Step 1',
+      title: 'Describe your program',
+      body: 'Go to Chat and describe the Solana program you want to build.',
+      target: 'chat',
+    }
+  }
+  if (!props.designDocApprovedAt) {
+    return {
+      eyebrow: 'Step 2',
+      title: 'Approve the Design Doc',
+      body: 'Review the auto-drafted Design Doc below and tap Approve when it looks right.',
+      target: 'design-doc',
+    }
+  }
+  if (props.verificationProperties.length === 0) {
+    return {
+      eyebrow: 'Step 3',
+      title: 'Waiting on properties',
+      body: 'The backend is proposing verification properties. Refresh the project to check.',
+      target: 'properties',
+    }
+  }
+  if (!props.verificationPropertiesApprovedAt) {
+    return {
+      eyebrow: 'Step 3',
+      title: 'Approve verification properties',
+      body: 'Review the proposed properties and approve them to continue toward formal verification.',
+      target: 'properties',
+    }
+  }
+  if (!props.cvlrSpec) {
+    return {
+      eyebrow: 'Step 4',
+      title: 'Generate formal verification specs',
+      body: 'Create the specifications that describe what formal verification should prove.',
+      target: 'cvlr-spec',
+    }
+  }
+  if (!props.cvlrSpecApprovedAt) {
+    return {
+      eyebrow: 'Step 5',
+      title: 'Approve formal verification specs',
+      body: 'Review the generated spec below and approve it to submit to AI Composer.',
+      target: 'cvlr-spec',
+    }
+  }
+  const job = props.generationJob
+  if (!job || job.status === 'queued' || job.status === 'running') {
+    return {
+      eyebrow: 'Step 6',
+      title: 'AI Composer is running',
+      body: 'Generation is in progress. Tap Refresh to check the latest status.',
+      target: 'design-doc',
+    }
+  }
+  if (job.status !== 'succeeded') {
+    return {
+      eyebrow: 'Step 6',
+      title: 'Review generation result',
+      body: 'The generation job finished with an issue. Check the log and retry from the Design Doc card.',
+      target: 'design-doc',
+    }
+  }
+  if (PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
+    const deployed = props.deploymentJob?.status === 'succeeded'
+    if (!deployed) {
+      return {
+        eyebrow: 'Step 7',
+        title: 'Deploy to devnet',
+        body: 'Your program is generated. Connect a wallet and deploy it to Solana devnet.',
+        target: 'deployment',
+      }
+    }
+  }
+  if (!props.publishedAt) {
+    return {
+      eyebrow: PROGRAM_DEPLOYMENT_FLOW_ENABLED ? 'Step 8' : 'Step 7',
+      title: 'Publish to Explore',
+      body: 'Share your approved project and verification properties with the community by opting in below.',
+      target: 'publish',
+    }
+  }
+  return {
+    eyebrow: 'Keep going',
+    title: 'Add another invariant',
+    body: PROGRAM_DEPLOYMENT_FLOW_ENABLED
+      ? 'Your program is live and published. Strengthen its guarantees by adding one more verification property today.'
+      : 'Your project is published. Strengthen its guarantees by adding one more verification property today.',
+    target: 'daily-property',
+  }
+}
+
+function SuggestedNextActionCard({
+  cvlrSpec,
+  cvlrSpecApprovedAt,
+  deploymentJob,
+  designDoc,
+  designDocApprovedAt,
+  generationJob,
+  publishedAt,
+  verificationProperties,
+  verificationPropertiesApprovedAt,
+  onGoToCard,
+}: {
+  cvlrSpec: CvlrSpec | null
+  cvlrSpecApprovedAt: string | null
+  deploymentJob: DeploymentJobRecord | null
+  designDoc: MvpDesignDoc | null
+  designDocApprovedAt: string | null
+  generationJob: GenerationJobRecord | null
+  publishedAt: string | null
+  verificationProperties: VerificationProperty[]
+  verificationPropertiesApprovedAt: string | null
+  onGoToCard: (target: WorkspaceCardTarget) => void
+}) {
+  const action = deriveSuggestedNextAction({
+    cvlrSpec,
+    cvlrSpecApprovedAt,
+    deploymentJob,
+    designDoc,
+    designDocApprovedAt,
+    generationJob,
+    publishedAt,
+    verificationProperties,
+    verificationPropertiesApprovedAt,
+  })
+  return (
+    <View className="gap-3 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Suggested next action</Text>
+          <Text className="text-xl font-black leading-6 text-[#fff4cf]">{action.title}</Text>
+          <Text className="text-sm leading-5 text-[#fff4cf]/70">{action.body}</Text>
+        </View>
+        <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
+          <Text className="text-xs font-black text-[#ffe6a3]">{action.eyebrow}</Text>
+        </View>
+      </View>
+      <Pressable
+        accessibilityLabel={`Go to ${action.title}`}
+        accessibilityRole="button"
+        onPress={() => onGoToCard(action.target)}
+        className="items-center rounded-full bg-[#ffd978] px-4 py-3 active:bg-[#ffe6a3]"
+      >
+        <Text className="text-sm font-black text-[#201626]">Go to card</Text>
+      </Pressable>
+    </View>
+  )
+}
+
+function DailyPropertyCard({
+  designDocApprovedAt,
+  onSuggestProperty,
+}: {
+  designDocApprovedAt: string | null
+  onSuggestProperty: (text: string) => void
+}) {
+  const [draft, setDraft] = useState('')
+  if (!designDocApprovedAt) {
+    return null
+  }
+  return (
+    <View className="gap-3 rounded-lg border border-[#c8d6ff]/20 bg-[#1a1f2e] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Today challenge</Text>
+          <Text className="text-xl font-black leading-6 text-[#fff4cf]">Add one more invariant</Text>
+          <Text className="text-sm leading-5 text-[#fff4cf]/70">
+            Each property you add strengthens the formal guarantees of your program. Describe one in plain language and
+            discuss it in Chat.
+          </Text>
+        </View>
+        <View className="rounded-full bg-[#c8d6ff]/15 px-3 py-2">
+          <Text className="text-xs font-black text-[#c8d6ff]">Daily</Text>
+        </View>
+      </View>
+      <TextInput
+        multiline
+        numberOfLines={2}
+        placeholder="e.g. Only the admin can update the program authority…"
+        placeholderTextColor="rgba(200,214,255,0.35)"
+        value={draft}
+        onChangeText={setDraft}
+        className="rounded-lg border border-[#c8d6ff]/20 bg-[#0d1117] px-3 py-3 text-sm leading-5 text-[#c8d6ff]"
+      />
+      <Pressable
+        accessibilityRole="button"
+        disabled={!draft.trim()}
+        onPress={() => {
+          onSuggestProperty(draft.trim())
+          setDraft('')
+        }}
+        className={`items-center rounded-full px-4 py-3 ${draft.trim() ? 'bg-[#c8d6ff]/30 active:bg-[#c8d6ff]/50' : 'bg-[#c8d6ff]/10'}`}
+      >
+        <Text className={`text-sm font-black ${draft.trim() ? 'text-[#c8d6ff]' : 'text-[#c8d6ff]/35'}`}>
+          Discuss in Chat
+        </Text>
+      </Pressable>
+    </View>
+  )
+}
+
+function ProgramDeploymentDisabledCard() {
+  return (
+    <View className="gap-3 rounded-lg border border-[#eef2ff]/15 bg-[#181b29] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Program deployment</Text>
+          <Text className="text-xl font-black leading-6 text-[#eef2ff]">Disabled for this build</Text>
+          <Text className="text-sm leading-5 text-[#eef2ff]/65">
+            Devnet deployment and wallet signing are paused until the full deployment flow has been tested.
+          </Text>
+        </View>
+        <View className="rounded-full bg-[#eef2ff]/10 px-3 py-2">
+          <Text className="text-xs font-black text-[#c8d6ff]">Deferred</Text>
+        </View>
+      </View>
+    </View>
+  )
+}
+
+function ProgramHealthCard({ deploymentJob }: { deploymentJob: DeploymentJobRecord | null }) {
+  if (deploymentJob?.status !== 'succeeded') {
+    return null
+  }
+  return (
+    <View className="gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Program activity</Text>
+          <Text className="text-xl font-black leading-6 text-[#fff4cf]">On-chain monitor</Text>
+          <Text className="text-sm leading-5 text-[#fff4cf]/70">
+            Live transaction counts, account changes, and error rates for your deployed program will appear here.
+          </Text>
+        </View>
+        <View className="rounded-full bg-[#fff4cf]/10 px-3 py-2">
+          <Text className="text-xs font-black text-[#fff4cf]/45">Coming soon</Text>
+        </View>
+      </View>
+      {deploymentJob.programId ? (
+        <Text
+          selectable
+          className="rounded-lg border border-[#fff4cf]/10 bg-[#fff4cf]/5 px-3 py-2 font-mono text-xs text-[#fff4cf]/55"
+        >
+          {deploymentJob.programId}
+        </Text>
+      ) : null}
+    </View>
+  )
+}
+
+function CvlrSpecCard({
+  cvlrSpec,
+  cvlrSpecApprovedAt,
+  error,
+  isApproving,
+  isGenerating,
+  verificationPropertiesApprovedAt,
+  onApprove,
+  onGenerate,
+}: {
+  cvlrSpec: CvlrSpec | null
+  cvlrSpecApprovedAt: string | null
+  error: string | null
+  isApproving: boolean
+  isGenerating: boolean
+  verificationPropertiesApprovedAt: string | null
+  onApprove: () => void
+  onGenerate: () => void
+}) {
+  if (!verificationPropertiesApprovedAt) {
+    return (
+      <View className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-4">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Formal verification specs</Text>
+        <Text className="text-lg font-black text-[#fff4cf]">Waiting on property approval</Text>
+        <Text className="text-sm leading-6 text-[#fff4cf]/70">
+          Approve the verification properties above before generating the specifications for formal verification.
+        </Text>
+      </View>
+    )
+  }
+
+  const approved = Boolean(cvlrSpecApprovedAt)
+
+  return (
+    <View className="gap-4 rounded-lg border border-[#c8d6ff]/25 bg-[#1a1f2e] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Formal verification specs</Text>
+          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">
+            {approved ? 'Spec approved' : cvlrSpec ? 'Review and approve' : 'Generate spec'}
+          </Text>
+          <Text className="text-sm leading-6 text-[#fff4cf]/70">
+            {approved
+              ? 'AI Composer will use this spec for generation. Editing properties will reset it.'
+              : cvlrSpec
+                ? 'Review the generated formal verification specifications. Approve to submit to AI Composer, or regenerate.'
+                : 'Generate the formal verification specifications from the approved properties.'}
+          </Text>
+        </View>
+        <View
+          className={`rounded-full px-3 py-2 ${approved ? 'bg-[#75e6be]/15' : cvlrSpec ? 'bg-[#c8d6ff]/15' : 'bg-[#fff4cf]/10'}`}
+        >
+          <Text
+            className={`text-xs font-black ${approved ? 'text-[#adf7e6]' : cvlrSpec ? 'text-[#c8d6ff]' : 'text-[#fff4cf]/55'}`}
+          >
+            {approved ? 'Approved' : cvlrSpec ? 'Ready' : 'Pending'}
+          </Text>
+        </View>
+      </View>
+
+      {cvlrSpec ? (
+        <View className="gap-2 rounded-lg border border-[#c8d6ff]/15 bg-[#0d1117] p-3">
+          <Text className="text-[10px] font-black uppercase tracking-widest text-[#c8d6ff]/55">checks.rs</Text>
+          <Text selectable className="font-mono text-xs leading-5 text-[#c8d6ff]/85" numberOfLines={12}>
+            {cvlrSpec.checksRs}
+          </Text>
+        </View>
+      ) : null}
+
+      {error ? (
+        <Text className="rounded-lg border border-[#ff8a5c]/25 bg-[#ff8a5c]/10 px-3 py-2 text-sm text-[#ff8a5c]">
+          {error}
+        </Text>
+      ) : null}
+
+      {!approved ? (
+        <View className="gap-2">
+          <Pressable
+            accessibilityRole="button"
+            disabled={isGenerating || isApproving}
+            onPress={onGenerate}
+            className={`items-center rounded-full px-4 py-3 ${isGenerating || isApproving ? 'bg-[#c8d6ff]/20' : 'bg-[#c8d6ff]/30 active:bg-[#c8d6ff]/50'}`}
+          >
+            <Text className="text-sm font-black text-[#c8d6ff]">
+              {isGenerating
+                ? 'Generating...'
+                : cvlrSpec
+                  ? 'Regenerate specifications'
+                  : 'Generate formal verification specs'}
+            </Text>
+          </Pressable>
+
+          {cvlrSpec ? (
+            <View className="flex-row gap-2">
+              <Pressable
+                accessibilityRole="button"
+                disabled={true}
+                className="flex-1 items-center rounded-full bg-[#fff4cf]/10 px-4 py-3"
+              >
+                <Text className="text-sm font-black text-[#fff4cf]/35">Request Sec Pro review</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={isApproving || isGenerating}
+                onPress={onApprove}
+                className={`flex-1 items-center rounded-full px-4 py-3 ${isApproving || isGenerating ? 'bg-[#75e6be]/20' : 'bg-[#75e6be] active:bg-[#adf7e6]'}`}
+              >
+                <Text
+                  className={`text-sm font-black ${isApproving || isGenerating ? 'text-[#75e6be]/50' : 'text-[#0d3b35]'}`}
+                >
+                  {isApproving ? 'Approving...' : 'Approve specifications'}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+      ) : (
+        <Text className="rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 px-3 py-2 text-sm leading-5 text-[#dffdf4]">
+          Approved {formatSavedAt(cvlrSpecApprovedAt!)}. AI Composer generation is starting.
+        </Text>
+      )}
+    </View>
+  )
+}
+
 function PropertiesToProveCard({
   designDocApprovedAt,
   properties,
@@ -1482,7 +2506,7 @@ function PropertiesToProveCard({
         <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
         <Text className="text-lg font-black text-[#fff4cf]">Waiting on Design Doc approval</Text>
         <Text className="text-sm leading-6 text-[#fff4cf]/70">
-          Approve the Design Doc above before the app proposes properties and invariants for CVLR generation.
+          Approve the Design Doc above before the app suggests the properties to prove.
         </Text>
       </View>
     )
@@ -1495,9 +2519,10 @@ function PropertiesToProveCard({
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1 gap-1">
           <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
-          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Review before CVLR generation</Text>
+          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Review the properties to prove</Text>
           <Text className="text-sm leading-6 text-[#fff4cf]/70">
-            These proof targets come from the approved Design Doc and must be approved before generation starts.
+            These proof targets come from the approved Design Doc and must be approved before the app generates formal
+            verification specifications.
           </Text>
         </View>
         <View className={`rounded-full px-3 py-2 ${approved ? 'bg-[#75e6be]/15' : 'bg-[#ffd978]/15'}`}>
@@ -1510,9 +2535,7 @@ function PropertiesToProveCard({
       <View className="gap-2">
         {properties.map((property) => (
           <View key={property.id} className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
-            <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">
-              {property.label}
-            </Text>
+            <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">{property.label}</Text>
             <Text className="text-sm font-black leading-5 text-[#fff4cf]">{property.statement}</Text>
             <Text className="text-xs leading-5 text-[#fff4cf]/65">{property.rationale}</Text>
           </View>
@@ -1536,6 +2559,187 @@ function PropertiesToProveCard({
           </Text>
         </Pressable>
       )}
+    </View>
+  )
+}
+
+function DeploymentCard({
+  accountAddress,
+  deploymentError,
+  deploymentJob,
+  generationJob,
+  isRefreshingDeploymentStatus,
+  isSigningDeployment,
+  isSubmittingDeployment,
+  onRefresh,
+  onSign,
+  onStart,
+  walletConnected,
+}: {
+  accountAddress?: string
+  deploymentError: string | null
+  deploymentJob: DeploymentJobRecord | null
+  generationJob: GenerationJobRecord | null
+  isRefreshingDeploymentStatus: boolean
+  isSigningDeployment: boolean
+  isSubmittingDeployment: boolean
+  onRefresh: () => void
+  onSign: () => void
+  onStart: () => void
+  walletConnected: boolean
+}) {
+  const deployableArtifact = getDeployableGenerationArtifact(generationJob)
+  const deploymentStatus = deploymentJob?.status ?? ''
+  const blocker = getDevnetDeploymentBlocker(
+    {
+      ...createInitialMvpShellState(),
+      generationJob,
+      deploymentJob,
+    },
+    walletConnected,
+  )
+  const hasSignatureRequest = Boolean(deploymentJob?.signatureRequest)
+  const hasBlockingDeploymentJob =
+    Boolean(deploymentJob) &&
+    !hasSignatureRequest &&
+    (isActiveDeploymentJob(deploymentStatus) || deploymentStatus === 'blocked' || deploymentStatus === 'succeeded')
+  const deploymentBlocked = Boolean(blocker) || isSubmittingDeployment || hasBlockingDeploymentJob
+  const startButtonLabel = isSubmittingDeployment
+    ? 'Preparing deploy...'
+    : deploymentStatus === 'succeeded'
+      ? 'Deployed to devnet'
+      : deploymentStatus === 'blocked'
+        ? 'Refresh deployment'
+        : blocker
+          ? 'Deploy unavailable'
+          : 'Deploy to devnet'
+
+  return (
+    <View className="gap-4 rounded-lg border border-[#75e6be]/25 bg-[#152f2d] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Devnet deployment</Text>
+          <Text className="text-2xl font-black leading-7 text-[#dffdf4]">Deploy generated program</Text>
+          <Text className="text-sm leading-6 text-[#dffdf4]/70">
+            Backend prepares the generated artifact. Your connected wallet signs the devnet deployment transaction.
+          </Text>
+        </View>
+        <View className={`rounded-full px-3 py-2 ${getDeploymentStatusBadgeClass(deploymentJob?.status ?? 'ready')}`}>
+          <Text className="text-xs font-black text-[#dffdf4]">
+            {deploymentJob ? getDeploymentStatusLabel(deploymentJob.status) : deployableArtifact ? 'Ready' : 'Waiting'}
+          </Text>
+        </View>
+      </View>
+
+      {deployableArtifact ? (
+        <View className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployable artifact</Text>
+          <Text className="text-sm font-black text-[#eef2ff]">{deployableArtifact.name}</Text>
+          <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
+            {deployableArtifact.artifactId}
+          </Text>
+        </View>
+      ) : (
+        <Text className="rounded-lg border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-2 text-sm leading-5 text-[#eef2ff]/70">
+          Generate a Solana program artifact before devnet deployment.
+        </Text>
+      )}
+
+      {deploymentJob ? (
+        <View className="gap-2 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployment job</Text>
+          <Text className="text-sm font-semibold text-[#dffdf4]">{deploymentJob.summary}</Text>
+          <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
+            Job id: {deploymentJob.jobId}
+          </Text>
+          <Text className="text-xs leading-5 text-[#dffdf4]/70">Cluster: {deploymentJob.cluster}</Text>
+          {deploymentJob.payerWallet ? (
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">
+              Payer: {formatShortIdentifier(deploymentJob.payerWallet)}
+            </Text>
+          ) : null}
+          {deploymentJob.authorityWallet ? (
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">
+              Authority: {formatShortIdentifier(deploymentJob.authorityWallet)}
+            </Text>
+          ) : null}
+          {deploymentJob.programId ? (
+            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
+              Program id: {deploymentJob.programId}
+            </Text>
+          ) : null}
+          {deploymentJob.transactionSignatures.length > 0 ? (
+            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
+              Signature: {formatShortIdentifier(deploymentJob.transactionSignatures[0])}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      {deploymentJob?.signatureRequest ? (
+        <View className="gap-2 rounded-xl border border-[#ffd978]/25 bg-[#ffd978]/10 p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Before signing</Text>
+          <Text className="text-sm font-black leading-5 text-[#fff4cf]">{DEVNET_DEPLOYMENT_DEMO_WARNING}</Text>
+          <Text className="text-xs leading-5 text-[#fff4cf]/70">{deploymentJob.signatureRequest.summary}</Text>
+          {deploymentJob.signatureRequest.simulationSummary ? (
+            <Text className="text-xs leading-5 text-[#fff4cf]/70">
+              Simulation: {deploymentJob.signatureRequest.simulationSummary}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      {deploymentError ? (
+        <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
+          {deploymentError}
+        </Text>
+      ) : null}
+
+      <View className="gap-2">
+        {hasSignatureRequest ? (
+          <Pressable
+            accessibilityLabel="Sign devnet deployment transaction"
+            accessibilityRole="button"
+            disabled={isSigningDeployment}
+            onPress={onSign}
+            className={`items-center rounded-full px-4 py-3 ${isSigningDeployment ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
+          >
+            <Text className="text-sm font-black text-[#201626]">
+              {isSigningDeployment ? 'Opening wallet...' : 'Sign devnet transaction'}
+            </Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            accessibilityLabel="Deploy generated program to devnet"
+            accessibilityRole="button"
+            disabled={deploymentBlocked}
+            onPress={onStart}
+            className={`items-center rounded-full px-4 py-3 ${deploymentBlocked ? 'bg-[#75e6be]/25' : 'bg-[#75e6be] active:bg-[#9af2d7]'}`}
+          >
+            <Text className="text-sm font-black text-[#0d3b35]">{startButtonLabel}</Text>
+          </Pressable>
+        )}
+
+        {deploymentJob ? (
+          <Pressable
+            accessibilityLabel="Refresh deployment status"
+            accessibilityRole="button"
+            disabled={isRefreshingDeploymentStatus}
+            onPress={onRefresh}
+            className={`items-center rounded-full px-4 py-2 ${isRefreshingDeploymentStatus ? 'bg-[#75e6be]/15' : 'bg-[#75e6be]/25 active:bg-[#75e6be]/35'}`}
+          >
+            <Text className="text-xs font-black text-[#dffdf4]">
+              {isRefreshingDeploymentStatus ? 'Refreshing deployment...' : 'Refresh deployment'}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+
+      {accountAddress ? (
+        <Text className="text-xs leading-5 text-[#dffdf4]/55">
+          Connected wallet: {formatShortIdentifier(accountAddress)}
+        </Text>
+      ) : null}
     </View>
   )
 }
@@ -1568,7 +2772,9 @@ function GeneratedResultSummary({
           <View key={artifact.artifactId} className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
             <View className="flex-row items-start justify-between gap-3">
               <Text className="min-w-0 flex-1 text-sm font-black text-[#eef2ff]">{artifact.name}</Text>
-              <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">{artifact.typeLabel}</Text>
+              <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">
+                {artifact.typeLabel}
+              </Text>
             </View>
             <Text className="text-xs leading-5 text-[#dffdf4]/70">{artifact.summary}</Text>
             <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
@@ -1582,64 +2788,71 @@ function GeneratedResultSummary({
 }
 
 function EditableDocField({
+  approved = false,
   label,
   multiline = false,
+  onApprove,
   onChangeText,
+  onDiscuss,
+  proposedText,
   value,
 }: {
+  approved?: boolean
   label: string
   multiline?: boolean
+  onApprove?: () => void
   onChangeText: (value: string) => void
+  onDiscuss?: () => void
+  proposedText?: string | null
   value: string
 }) {
+  const proposedWording =
+    proposedText && proposedText.trim() && proposedText.trim() !== value.trim() ? proposedText.trim() : null
+
   return (
-    <View className="gap-2">
-      <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">{label}</Text>
+    <View className="gap-2 rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 p-3">
+      <View className="flex-row items-center justify-between gap-2">
+        <Text className="min-w-0 flex-1 text-xs font-black uppercase tracking-widest text-[#c8d6ff]">{label}</Text>
+        <View className="flex-row items-center gap-2">
+          {onDiscuss ? (
+            <Pressable
+              accessibilityLabel={`Discuss ${label}`}
+              accessibilityRole="button"
+              onPress={onDiscuss}
+              className="rounded-full border border-[#c8d6ff]/20 bg-[#c8d6ff]/10 px-3 py-1.5 active:bg-[#c8d6ff]/20"
+            >
+              <Text className="text-[11px] font-black text-[#c8d6ff]">Change</Text>
+            </Pressable>
+          ) : null}
+          {onApprove ? (
+            <Pressable
+              accessibilityLabel={`${approved ? 'Unapprove' : 'Approve'} ${label}`}
+              accessibilityRole="button"
+              onPress={onApprove}
+              className={`h-8 w-8 items-center justify-center rounded-full ${approved ? 'bg-[#75e6be]' : 'border border-[#75e6be]/30 bg-[#75e6be]/10'}`}
+            >
+              <Text className={`text-base font-black ${approved ? 'text-[#0d3b35]' : 'text-[#adf7e6]'}`}>✓</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
       <TextInput
         multiline={multiline}
         onChangeText={onChangeText}
         placeholder={label}
         placeholderTextColor="rgba(238,242,255,0.35)"
         style={{ minHeight: multiline ? 88 : 46, textAlignVertical: multiline ? 'top' : 'center' }}
-        className="rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/8 px-4 py-3 text-sm font-semibold leading-6 text-[#eef2ff]"
+        className="rounded-xl border border-[#eef2ff]/12 bg-[#0d1117] px-4 py-3 text-sm font-semibold leading-6 text-[#eef2ff]"
         value={value}
       />
-    </View>
-  )
-}
-
-function MiniDecisionCard({ body, label, title }: { body: string; label: string; title: string }) {
-  return (
-    <View className="min-h-28 flex-1 gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
-      <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">{label}</Text>
-      <Text className="text-sm font-black leading-5 text-[#fff4cf]">{title}</Text>
-      <Text className="text-xs text-[#fff4cf]/60">{body}</Text>
-    </View>
-  )
-}
-
-function StageRow({ activeStage, compact = false }: { activeStage: string; compact?: boolean }) {
-  return (
-    <View
-      className={`flex-row flex-wrap gap-1 rounded-lg bg-[#fff4cf]/10 p-1 ${compact ? '' : 'border border-[#fff4cf]/10'}`}
-    >
-      {stages.map((stage) => {
-        const active = stage === activeStage
-        const done = stages.indexOf(stage) < stages.indexOf(activeStage)
-
-        return (
-          <View
-            key={stage}
-            className={`rounded-md px-2 py-1 ${active ? 'bg-[#ffd978]' : done ? 'bg-[#75e6be]' : 'bg-transparent'}`}
-          >
-            <Text
-              className={`text-[10px] font-black ${active ? 'text-[#201626]' : done ? 'text-[#0d3b35]' : 'text-[#fff4cf]/45'}`}
-            >
-              {stage}
-            </Text>
-          </View>
-        )
-      })}
+      {proposedWording ? (
+        <View className="gap-2 rounded-xl border border-[#75e6be]/18 bg-[#75e6be]/8 p-3">
+          <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">Proposed wording</Text>
+          <Text className="text-xs leading-5 text-[#dffdf4]" style={{ textDecorationLine: 'underline' }}>
+            {proposedWording}
+          </Text>
+        </View>
+      ) : null}
     </View>
   )
 }
@@ -1688,6 +2901,7 @@ function SettingRow({
 
 function EditableSettingRow({
   body,
+  disabled = false,
   onChangeText,
   placeholder,
   secureTextEntry = false,
@@ -1696,6 +2910,7 @@ function EditableSettingRow({
   value,
 }: {
   body: string
+  disabled?: boolean
   onChangeText: (value: string) => void
   placeholder: string
   secureTextEntry?: boolean
@@ -1704,7 +2919,7 @@ function EditableSettingRow({
   value: string
 }) {
   return (
-    <View className="gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
+    <View className={`gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3 ${disabled ? 'opacity-60' : ''}`}>
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1">
           <Text className="text-base font-black text-[#fff4cf]">{title}</Text>
@@ -1715,18 +2930,21 @@ function EditableSettingRow({
         </View>
       </View>
 
-      <View className="flex-row items-center gap-2 rounded-xl border border-[#fff4cf]/15 bg-[#fff4cf]/10 px-3 py-2">
+      <View
+        className={`flex-row items-center gap-2 rounded-xl border border-[#fff4cf]/15 px-3 py-2 ${disabled ? 'bg-[#fff4cf]/5' : 'bg-[#fff4cf]/10'}`}
+      >
         <TextInput
           autoCapitalize="none"
           autoCorrect={false}
           className="min-w-0 flex-1 text-sm font-semibold text-[#fff4cf]"
+          editable={!disabled}
           onChangeText={onChangeText}
           placeholder={placeholder}
-          placeholderTextColor="rgba(255,244,207,0.45)"
+          placeholderTextColor={disabled ? 'rgba(255,244,207,0.25)' : 'rgba(255,244,207,0.45)'}
           secureTextEntry={secureTextEntry}
           value={value}
         />
-        {value ? (
+        {value && !disabled ? (
           <Pressable
             accessibilityLabel={`Clear ${title}`}
             accessibilityRole="button"
@@ -1744,41 +2962,29 @@ function EditableSettingRow({
 function ExploreView({
   exploreTab,
   onExploreTabChange,
+  projectTitle,
+  projectSummary,
+  publishedAt,
+  verificationProperties,
 }: {
   exploreTab: ExploreTab
   onExploreTabChange: (tab: ExploreTab) => void
+  projectTitle: string | null
+  projectSummary: string | null
+  publishedAt: string | null
+  verificationProperties: VerificationProperty[]
 }) {
-  const activeItems = exploreTab === 'projects' ? builderProjects : propertyGuides
-  const featured =
-    exploreTab === 'projects'
-      ? {
-          eyebrow: 'Featured project',
-          title: 'Protocol Atlas',
-          heading: 'Visible assurance ladder',
-          body: 'Browse what was checked and what still needs review.',
-          badge: 'Level 2 assurance',
-        }
-      : {
-          eyebrow: 'Featured property guide',
-          title: 'Money never disappears',
-          heading: 'Invariants without the scare words',
-          body: 'Turn a user promise into a checkable rule.',
-          badge: 'Beginner friendly',
-        }
-
   return (
     <View className="gap-4">
-      <View className="gap-2">
-        <View className="flex-row items-start justify-between gap-3">
-          <View className="min-w-0 flex-1">
-            <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Other builders&apos; projects</Text>
-            <Text className="mt-2 text-sm leading-5 text-[#fff4cf]/70">
-              Learn from opt-in projects, properties, and assurance trails.
-            </Text>
-          </View>
-          <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
-            <Text className="text-xs font-black text-[#ffe6a3]">Opt-in</Text>
-          </View>
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1">
+          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Community projects</Text>
+          <Text className="mt-2 text-sm leading-5 text-[#fff4cf]/70">
+            Projects and properties shared by builders who opted in from their Workspace.
+          </Text>
+        </View>
+        <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
+          <Text className="text-xs font-black text-[#ffe6a3]">Opt-in</Text>
         </View>
       </View>
 
@@ -1795,48 +3001,63 @@ function ExploreView({
         />
       </View>
 
-      <View className="overflow-hidden rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37]">
-        <View className="min-h-44 justify-end bg-[#5b3146] p-4">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#fff4cf]/55">{featured.eyebrow}</Text>
-          <Text className="mt-2 text-3xl font-black leading-8 text-[#fff4cf]">{featured.title}</Text>
-        </View>
-        <View className="gap-2 p-4">
-          <Text className="text-base font-black text-[#fff4cf]">{featured.heading}</Text>
-          <Text className="text-sm leading-6 text-[#fff4cf]/65">{featured.body}</Text>
-          <View className="self-start rounded-full bg-[#75e6be]/15 px-3 py-2">
-            <Text className="text-xs font-black text-[#adf7e6]">{featured.badge}</Text>
-          </View>
-        </View>
-      </View>
-
-      <View className="gap-3">
-        <SectionTitle
-          title={exploreTab === 'projects' ? 'Published projects' : 'Learn invariants and properties'}
-          badge="Read-only"
-        />
-        {activeItems.map((item) => (
-          <View
-            key={item.name}
-            className="flex-row items-center gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3"
-          >
-            <View className="h-14 w-11 rounded-lg border border-[#fff4cf]/15 bg-[#ff8a5c]" />
-            <View className="min-w-0 flex-1">
-              <Text className="text-base font-black text-[#fff4cf]">{item.name}</Text>
-              <Text className="text-sm leading-5 text-[#fff4cf]/65">{item.summary}</Text>
+      {exploreTab === 'projects' ? (
+        <View className="gap-3">
+          <SectionTitle title="Published projects" badge={publishedAt ? '1 project' : 'None yet'} />
+          {publishedAt && projectTitle ? (
+            <View className="flex-row items-center gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
+              <View className="h-14 w-11 rounded-lg border border-[#75e6be]/25 bg-[#75e6be]/20" />
+              <View className="min-w-0 flex-1">
+                <Text className="text-base font-black text-[#fff4cf]">{projectTitle}</Text>
+                {projectSummary ? (
+                  <Text className="text-sm leading-5 text-[#fff4cf]/65" numberOfLines={2}>
+                    {projectSummary}
+                  </Text>
+                ) : null}
+              </View>
+              <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
+                <Text className="text-xs font-black text-[#adf7e6]">Published</Text>
+              </View>
             </View>
-            <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
-              <Text className="text-xs font-black text-[#ffe6a3]">{item.badge}</Text>
+          ) : (
+            <View className="gap-2 rounded-lg border border-[#fff4cf]/10 bg-[#fff4cf]/5 p-4">
+              <Text className="text-base font-black text-[#fff4cf]">No published projects yet</Text>
+              <Text className="text-sm leading-5 text-[#fff4cf]/55">
+                Projects appear here when builders opt in from their Workspace.
+              </Text>
             </View>
-          </View>
-        ))}
-      </View>
+          )}
+        </View>
+      ) : null}
 
-      <View className="gap-2 rounded-lg border border-[#75e6be]/25 bg-[#75e6be]/10 p-4">
-        <Text className="text-base font-black text-[#dffdf4]">From product promise to property</Text>
-        <Text className="text-sm leading-5 text-[#dffdf4]/75">
-          Start with: always true, allowed to act, never lost.
-        </Text>
-      </View>
+      {exploreTab === 'properties' ? (
+        <View className="gap-3">
+          <SectionTitle
+            title="Published properties"
+            badge={publishedAt && verificationProperties.length > 0 ? `${verificationProperties.length}` : 'None yet'}
+          />
+          {publishedAt && verificationProperties.length > 0 ? (
+            verificationProperties.map((property) => (
+              <View key={property.id} className="gap-1 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
+                <View className="flex-row items-center justify-between gap-3">
+                  <Text className="text-sm font-black text-[#fff4cf]">{property.label}</Text>
+                  <View className="rounded-full bg-[#ffd978]/15 px-3 py-1">
+                    <Text className="text-[10px] font-black text-[#ffe6a3]">Property</Text>
+                  </View>
+                </View>
+                <Text className="text-sm leading-5 text-[#fff4cf]/65">{property.statement}</Text>
+              </View>
+            ))
+          ) : (
+            <View className="gap-2 rounded-lg border border-[#fff4cf]/10 bg-[#fff4cf]/5 p-4">
+              <Text className="text-base font-black text-[#fff4cf]">No published properties yet</Text>
+              <Text className="text-sm leading-5 text-[#fff4cf]/55">
+                Verification properties appear here once a builder publishes their project.
+              </Text>
+            </View>
+          )}
+        </View>
+      ) : null}
     </View>
   )
 }
@@ -1881,8 +3102,10 @@ function BottomNav({ activeTab, onChangeTab }: { activeTab: PrimaryTab; onChange
         return (
           <Pressable
             key={tab.key}
+            accessibilityLabel={`Open ${tab.label} tab`}
             accessibilityRole="button"
             onPress={() => onChangeTab(tab.key)}
+            testID={`${tab.key}-tab-button`}
             className={`flex-1 rounded-full px-3 py-3 ${active ? 'bg-[#ffd978]' : 'bg-transparent'}`}
           >
             <Text className={`text-center text-xs font-black ${active ? 'text-[#201626]' : 'text-[#fff4cf]/50'}`}>

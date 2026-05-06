@@ -19,7 +19,7 @@ test('buildGenerationRequest turns the current design doc into the backend reque
 
   assert.deepEqual(request, {
     title: 'Chat-first mobile MVP',
-    workflow_mode: 'professional_development',
+    workflow_mode: 'vibe_coding',
     project_type: 'solana_mobile_app',
     design_doc: [
       '# Chat-first mobile MVP',
