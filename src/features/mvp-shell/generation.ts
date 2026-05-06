@@ -7,6 +7,15 @@ type BackendGenerationResponse = {
   status_url: string
   created_at: string
   updated_at: string
+  current_phase?: string | null
+  progress_summary?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  last_heartbeat_at?: string | null
+  ai_composer_thread_id?: string | null
+  last_checkpoint_id?: string | null
+  latest_log_excerpt?: string | null
+  last_materialized_snapshot_at?: string | null
   artifact_refs?: string[]
   artifacts?: {
     artifact_id: string
@@ -61,6 +70,15 @@ export async function readGenerationJobStatus({
       statusUrl: successPayload.status_url,
       createdAt: successPayload.created_at,
       updatedAt: successPayload.updated_at,
+      currentPhase: successPayload.current_phase ?? null,
+      progressSummary: successPayload.progress_summary ?? null,
+      startedAt: successPayload.started_at ?? null,
+      finishedAt: successPayload.finished_at ?? null,
+      lastHeartbeatAt: successPayload.last_heartbeat_at ?? null,
+      aiComposerThreadId: successPayload.ai_composer_thread_id ?? null,
+      lastCheckpointId: successPayload.last_checkpoint_id ?? null,
+      latestLogExcerpt: successPayload.latest_log_excerpt ?? null,
+      lastMaterializedSnapshotAt: successPayload.last_materialized_snapshot_at ?? null,
       artifactRefs: successPayload.artifact_refs ?? [],
       artifacts: normalizeArtifacts(successPayload.artifacts),
       providerLabel: successPayload.provider ?? null,
@@ -73,12 +91,16 @@ export async function readGenerationJobStatus({
 
 export async function submitGenerationJob({
   backendBaseUrl,
+  projectId,
   request,
 }: {
   backendBaseUrl: string
+  projectId?: string | null
   request: GenerationJobRequest
 }): Promise<GenerationJobRecord> {
-  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/jobs/generation`, {
+  const baseUrl = backendBaseUrl.replace(/\/$/, '')
+  const endpoint = projectId ? `${baseUrl}/projects/${projectId}/jobs/generation` : `${baseUrl}/jobs/generation`
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -100,6 +122,15 @@ export async function submitGenerationJob({
     statusUrl: successPayload.status_url,
     createdAt: successPayload.created_at,
     updatedAt: successPayload.updated_at,
+    currentPhase: successPayload.current_phase ?? null,
+    progressSummary: successPayload.progress_summary ?? null,
+    startedAt: successPayload.started_at ?? null,
+    finishedAt: successPayload.finished_at ?? null,
+    lastHeartbeatAt: successPayload.last_heartbeat_at ?? null,
+    aiComposerThreadId: successPayload.ai_composer_thread_id ?? null,
+    lastCheckpointId: successPayload.last_checkpoint_id ?? null,
+    latestLogExcerpt: successPayload.latest_log_excerpt ?? null,
+    lastMaterializedSnapshotAt: successPayload.last_materialized_snapshot_at ?? null,
     artifactRefs: successPayload.artifact_refs ?? [],
     artifacts: normalizeArtifacts(successPayload.artifacts),
     providerLabel: successPayload.provider ?? null,

@@ -3,15 +3,21 @@ const test = require('node:test')
 
 const {
   MVP_CAPTURE_ACK,
+  approveDesignDoc,
+  approveVerificationProperties,
   createInitialMvpShellState,
+  getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
   hasRenderableGenerationResult,
+  mergeBackendProjectState,
   restoreMvpShellState,
   saveGenerationJob,
   serializeMvpShellState,
   submitPrompt,
   updateDesignDocField,
+  updateDesignDocListField,
+  updateWorkflowMode,
 } = require('../.tmp-test-dist/features/mvp-shell/model.js')
 
 test('submitPrompt stores the latest prompt seed and appends a visible confirmation', () => {
@@ -29,6 +35,7 @@ test('submitPrompt stores the latest prompt seed and appends a visible confirmat
 
   assert.equal(nextState.latestPromptSeed?.prompt, 'Build a Solana mobile app that turns chat into one MVP design doc.')
   assert.equal(nextState.latestPromptSeed?.updatedAt, '2026-05-05T23:59:00Z')
+  assert.equal(nextState.workflowMode, 'professional_development')
   assert.deepEqual(
     nextState.messages.slice(-2),
     [
@@ -36,6 +43,7 @@ test('submitPrompt stores the latest prompt seed and appends a visible confirmat
         id: 'user-1',
         side: 'user',
         text: 'Build a Solana mobile app that turns chat into one MVP design doc.',
+        source: 'prompt_seed',
       },
       {
         id: 'app-1',
@@ -44,6 +52,136 @@ test('submitPrompt stores the latest prompt seed and appends a visible confirmat
       },
     ]
   )
+})
+
+test('workflow mode is preserved across prompt submission and serialization', () => {
+  const initialState = updateWorkflowMode(createInitialMvpShellState(), 'vibe_coding')
+  const savedState = submitPrompt(
+    initialState,
+    'Build a marketplace MVP.',
+    (() => {
+      const ids = ['user-1', 'app-1']
+      return () => ids.shift()
+    })(),
+    '2026-05-06T01:05:00Z'
+  )
+
+  const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
+
+  assert.equal(savedState.workflowMode, 'vibe_coding')
+  assert.equal(restoredState?.workflowMode, 'vibe_coding')
+})
+
+test('generation blocker reflects strict Vibe and Pro gates', () => {
+  const promptState = submitPrompt(
+    createInitialMvpShellState(),
+    'Build a marketplace MVP.',
+    (() => {
+      const ids = ['user-1', 'app-1']
+      return () => ids.shift()
+    })(),
+    '2026-05-06T01:05:00Z'
+  )
+  const vibeState = updateWorkflowMode(promptState, 'vibe_coding')
+  const readyState = approveVerificationProperties(
+    approveDesignDoc(updateDesignDocListField(vibeState, 'missingInformation', ''), '2026-05-06T01:06:00Z'),
+    '2026-05-06T01:07:00Z'
+  )
+
+  assert.match(getGenerationBlocker(promptState), /Answer or clear/)
+  assert.match(getGenerationBlocker(vibeState), /Use AI defaults/)
+  assert.equal(getGenerationBlocker(readyState), null)
+})
+
+test('approving the Design Doc proposes properties before generation can run', () => {
+  const promptState = updateDesignDocListField(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T01:05:00Z'
+    ),
+    'missingInformation',
+    ''
+  )
+
+  assert.equal(getGenerationBlocker(promptState), 'Approve the Design Doc in Workspace before generation.')
+
+  const designApprovedState = approveDesignDoc(promptState, '2026-05-06T01:06:00Z')
+
+  assert.equal(designApprovedState.designDocApprovedAt, '2026-05-06T01:06:00Z')
+  assert.equal(designApprovedState.verificationProperties.length, 3)
+  assert.equal(getGenerationBlocker(designApprovedState), 'Review and approve the properties to prove before generation.')
+
+  const propertiesApprovedState = approveVerificationProperties(designApprovedState, '2026-05-06T01:07:00Z')
+
+  assert.equal(propertiesApprovedState.verificationPropertiesApprovedAt, '2026-05-06T01:07:00Z')
+  assert.equal(getGenerationBlocker(propertiesApprovedState), null)
+})
+
+test('editing an approved Design Doc resets Design Doc and property approvals', () => {
+  const approvedState = approveVerificationProperties(
+    approveDesignDoc(
+      updateDesignDocListField(
+        submitPrompt(
+          createInitialMvpShellState(),
+          'Build a marketplace MVP.',
+          (() => {
+            const ids = ['user-1', 'app-1']
+            return () => ids.shift()
+          })(),
+          '2026-05-06T01:05:00Z'
+        ),
+        'missingInformation',
+        ''
+      ),
+      '2026-05-06T01:06:00Z'
+    ),
+    '2026-05-06T01:07:00Z'
+  )
+
+  const editedState = updateDesignDocField(approvedState, 'goal', 'Refined approved goal.')
+
+  assert.equal(editedState.designDocApprovedAt, null)
+  assert.deepEqual(editedState.verificationProperties, [])
+  assert.equal(editedState.verificationPropertiesApprovedAt, null)
+})
+
+test('backend refresh preserves local approvals when the Design Doc has not changed', () => {
+  const baseState = updateDesignDocListField(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T01:05:00Z'
+    ),
+    'missingInformation',
+    ''
+  )
+  const localState = approveVerificationProperties(
+    approveDesignDoc(baseState, '2026-05-06T01:06:00Z'),
+    '2026-05-06T01:07:00Z'
+  )
+  const backendState = {
+    ...baseState,
+    messages: [...baseState.messages, { id: 'app-2', side: 'app', text: 'Backend reply.' }],
+    designDocApprovedAt: null,
+    verificationProperties: [],
+    verificationPropertiesApprovedAt: null,
+  }
+
+  const mergedState = mergeBackendProjectState(backendState, localState)
+
+  assert.equal(mergedState.messages.at(-1)?.text, 'Backend reply.')
+  assert.equal(mergedState.designDocApprovedAt, '2026-05-06T01:06:00Z')
+  assert.equal(mergedState.verificationProperties.length, 3)
+  assert.equal(mergedState.verificationPropertiesApprovedAt, '2026-05-06T01:07:00Z')
 })
 
 test('blank prompt does not mutate state', () => {
@@ -134,6 +272,8 @@ test('restoreMvpShellState backfills one MVP design doc for legacy saved prompt-
 
   assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
   assert.match(restoredState?.designDoc?.goal ?? '', /hackathon-ready/i)
+  assert.deepEqual(restoredState?.suggestions, [])
+  assert.equal(restoredState?.workflowMode, 'professional_development')
 })
 
 test('serialized shell state can be restored after a relaunch without losing the latest prompt seed', () => {
@@ -150,6 +290,36 @@ test('serialized shell state can be restored after a relaunch without losing the
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
 
   assert.deepEqual(restoredState, savedState)
+})
+
+test('serialized shell state preserves generated suggestions', () => {
+  const savedState = {
+    ...submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T00:10:00Z'
+    ),
+    suggestions: [
+      {
+        id: 'sug_define_acceptance',
+        label: 'Suggestion 01',
+        title: 'Define acceptance checks',
+        body: 'Name the checks that prove the MVP is ready.',
+        detail: 'Use this to lock the test bar before generation starts.',
+        impact: 'Clearer readiness',
+        createdAt: '2026-05-06T01:10:00Z',
+      },
+    ],
+  }
+
+  const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
+
+  assert.equal(restoredState?.suggestions[0].id, 'sug_define_acceptance')
+  assert.equal(restoredState?.suggestions[0].title, 'Define acceptance checks')
 })
 
 test('restoreMvpShellState rejects malformed stored payloads', () => {

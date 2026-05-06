@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 
-const { buildGenerationRequest, createInitialMvpShellState, submitPrompt } = require('../.tmp-test-dist/features/mvp-shell/model.js')
+const { buildGenerationRequest, createInitialMvpShellState, submitPrompt, updateWorkflowMode } = require('../.tmp-test-dist/features/mvp-shell/model.js')
 const { readGenerationJobStatus, submitGenerationJob } = require('../.tmp-test-dist/features/mvp-shell/generation.js')
 
 test('buildGenerationRequest turns the current design doc into the backend request shape', () => {
@@ -19,7 +19,7 @@ test('buildGenerationRequest turns the current design doc into the backend reque
 
   assert.deepEqual(request, {
     title: 'Chat-first mobile MVP',
-    workflow_mode: 'generate',
+    workflow_mode: 'professional_development',
     project_type: 'solana_mobile_app',
     design_doc: [
       '# Chat-first mobile MVP',
@@ -43,10 +43,29 @@ test('buildGenerationRequest turns the current design doc into the backend reque
   })
 })
 
+test('buildGenerationRequest sends Vibe mode when the project selected Vibe', () => {
+  const state = updateWorkflowMode(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T01:05:00Z'
+    ),
+    'vibe_coding'
+  )
+
+  const request = buildGenerationRequest(state)
+
+  assert.equal(request.workflow_mode, 'vibe_coding')
+})
+
 test('submitGenerationJob posts the request to the backend and returns the stable queued job response', async () => {
   const request = {
     title: 'Marketplace MVP',
-    workflow_mode: 'generate',
+    workflow_mode: 'professional_development',
     project_type: 'solana_mobile_app',
     design_doc: '# Marketplace MVP\n\nBuild a local hackathon demo.',
   }

@@ -2,12 +2,17 @@ export type ChatMessage = {
   id: string
   side: 'user' | 'app'
   text: string
+  source?: 'main' | 'prompt_seed' | 'suggestion'
 }
 
 export type MvpProjectSeed = {
   prompt: string
   updatedAt: string
 }
+
+export type WorkflowMode = 'vibe_coding' | 'professional_development'
+
+export const DEFAULT_WORKFLOW_MODE: WorkflowMode = 'professional_development'
 
 export type MvpDesignDoc = {
   title: string
@@ -16,6 +21,23 @@ export type MvpDesignDoc = {
   assumptions: string[]
   missingInformation: string[]
   updatedAt: string
+}
+
+export type VerificationProperty = {
+  id: string
+  label: string
+  statement: string
+  rationale: string
+}
+
+export type Suggestion = {
+  id: string
+  label: string
+  title: string
+  body: string
+  detail: string
+  impact: string
+  createdAt: string
 }
 
 export type GenerationArtifactRecord = {
@@ -33,6 +55,15 @@ export type GenerationJobRecord = {
   statusUrl: string
   createdAt: string
   updatedAt: string
+  currentPhase?: string | null
+  progressSummary?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  lastHeartbeatAt?: string | null
+  aiComposerThreadId?: string | null
+  lastCheckpointId?: string | null
+  latestLogExcerpt?: string | null
+  lastMaterializedSnapshotAt?: string | null
   artifactRefs: string[]
   artifacts: GenerationArtifactRecord[]
   providerLabel?: string | null
@@ -40,16 +71,26 @@ export type GenerationJobRecord = {
 }
 
 export type MvpShellState = {
+  workflowMode: WorkflowMode
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
+  designDocApprovedAt: string | null
+  verificationProperties: VerificationProperty[]
+  verificationPropertiesApprovedAt: string | null
+  suggestions: Suggestion[]
   generationJob: GenerationJobRecord | null
 }
 
 type StoredMvpShellState = {
+  workflowMode?: WorkflowMode
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
+  designDocApprovedAt?: string | null
+  verificationProperties?: VerificationProperty[]
+  verificationPropertiesApprovedAt?: string | null
+  suggestions?: Suggestion[]
   generationJob: GenerationJobRecord | null
 }
 
@@ -61,19 +102,24 @@ export type GenerationJobRequest = {
 }
 
 export const MVP_CAPTURE_ACK =
-  'Saved as the MVP prompt seed. You can review or refine it before generation.'
+  'Project request captured. Review the Design Doc in Workspace before generation.'
 
 export function createInitialMvpShellState(): MvpShellState {
   return {
+    workflowMode: DEFAULT_WORKFLOW_MODE,
     messages: [
       {
         id: 'welcome-1',
         side: 'app',
-        text: 'Describe the app or program you want to build. Your latest prompt will be kept as the MVP seed.',
+        text: 'Describe the app or program you want to build. I will turn it into a Design Doc you can review.',
       },
     ],
     latestPromptSeed: null,
     designDoc: null,
+    designDocApprovedAt: null,
+    verificationProperties: [],
+    verificationPropertiesApprovedAt: null,
+    suggestions: [],
     generationJob: null,
   }
 }
@@ -97,6 +143,7 @@ export function submitPrompt(
         id: createId(),
         side: 'user',
         text: prompt,
+        source: 'prompt_seed',
       },
       {
         id: createId(),
@@ -104,11 +151,16 @@ export function submitPrompt(
         text: MVP_CAPTURE_ACK,
       },
     ],
+    workflowMode: state.workflowMode,
     latestPromptSeed: {
       prompt,
       updatedAt: nowIso,
     },
     designDoc: createDesignDocFromPrompt(prompt, nowIso),
+    designDocApprovedAt: null,
+    verificationProperties: [],
+    verificationPropertiesApprovedAt: null,
+    suggestions: [],
     generationJob: null,
   }
 }
@@ -120,9 +172,59 @@ export function buildGenerationRequest(state: MvpShellState): GenerationJobReque
 
   return {
     title: state.designDoc.title,
-    workflow_mode: 'generate',
+    workflow_mode: state.workflowMode,
     project_type: 'solana_mobile_app',
     design_doc: renderDesignDocMarkdown(state.designDoc),
+  }
+}
+
+export function updateWorkflowMode(state: MvpShellState, workflowMode: WorkflowMode): MvpShellState {
+  return {
+    ...state,
+    workflowMode,
+  }
+}
+
+export function getGenerationBlocker(state: MvpShellState): string | null {
+  if (!state.designDoc) {
+    return 'Create or restore an MVP Design Doc before generation can start.'
+  }
+  if (state.designDoc.missingInformation.length > 0) {
+    if (state.workflowMode === 'vibe_coding') {
+      return 'Use AI defaults or clear the missing information before generation.'
+    }
+    return 'Answer or clear the Design Doc missing information before generation.'
+  }
+  if (!state.designDocApprovedAt) {
+    return 'Approve the Design Doc in Workspace before generation.'
+  }
+  if (!state.verificationPropertiesApprovedAt) {
+    return 'Review and approve the properties to prove before generation.'
+  }
+  return null
+}
+
+export function approveDesignDoc(state: MvpShellState, nowIso: string): MvpShellState {
+  if (!state.designDoc) {
+    return state
+  }
+
+  return {
+    ...state,
+    designDocApprovedAt: nowIso,
+    verificationProperties: deriveVerificationProperties(state.designDoc, nowIso),
+    verificationPropertiesApprovedAt: null,
+  }
+}
+
+export function approveVerificationProperties(state: MvpShellState, nowIso: string): MvpShellState {
+  if (!state.designDocApprovedAt || state.verificationProperties.length === 0) {
+    return state
+  }
+
+  return {
+    ...state,
+    verificationPropertiesApprovedAt: nowIso,
   }
 }
 
@@ -186,6 +288,9 @@ export function updateDesignDocField(
       ...state.designDoc,
       [field]: value.trim(),
     },
+    designDocApprovedAt: null,
+    verificationProperties: [],
+    verificationPropertiesApprovedAt: null,
   }
 }
 
@@ -204,14 +309,22 @@ export function updateDesignDocListField(
       ...state.designDoc,
       [field]: splitLines(value),
     },
+    designDocApprovedAt: null,
+    verificationProperties: [],
+    verificationPropertiesApprovedAt: null,
   }
 }
 
 export function serializeMvpShellState(state: MvpShellState): string {
   const snapshot: StoredMvpShellState = {
+    workflowMode: state.workflowMode,
     messages: state.messages,
     latestPromptSeed: state.latestPromptSeed,
     designDoc: state.designDoc,
+    designDocApprovedAt: state.designDocApprovedAt,
+    verificationProperties: state.verificationProperties,
+    verificationPropertiesApprovedAt: state.verificationPropertiesApprovedAt,
+    suggestions: state.suggestions,
     generationJob: state.generationJob,
   }
 
@@ -242,6 +355,17 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       return null
     }
 
+    if (
+      parsed.verificationProperties !== undefined &&
+      (!Array.isArray(parsed.verificationProperties) || !parsed.verificationProperties.every(isVerificationProperty))
+    ) {
+      return null
+    }
+
+    if (parsed.suggestions !== undefined && (!Array.isArray(parsed.suggestions) || !parsed.suggestions.every(isSuggestion))) {
+      return null
+    }
+
     if (parsed.generationJob !== null && parsed.generationJob !== undefined) {
       const normalizedGenerationJob = normalizeGenerationJobRecord(parsed.generationJob)
 
@@ -253,6 +377,7 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
     }
 
     return {
+      workflowMode: normalizeWorkflowMode(parsed.workflowMode),
       messages: parsed.messages,
       latestPromptSeed: parsed.latestPromptSeed ?? null,
       designDoc:
@@ -260,10 +385,28 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
         (parsed.latestPromptSeed
           ? createDesignDocFromPrompt(parsed.latestPromptSeed.prompt, parsed.latestPromptSeed.updatedAt)
           : null),
+      designDocApprovedAt: typeof parsed.designDocApprovedAt === 'string' ? parsed.designDocApprovedAt : null,
+      verificationProperties: parsed.verificationProperties ?? [],
+      verificationPropertiesApprovedAt:
+        typeof parsed.verificationPropertiesApprovedAt === 'string' ? parsed.verificationPropertiesApprovedAt : null,
+      suggestions: parsed.suggestions ?? [],
       generationJob: (parsed.generationJob as GenerationJobRecord | undefined) ?? null,
     }
   } catch {
     return null
+  }
+}
+
+export function mergeBackendProjectState(backendState: MvpShellState, localState: MvpShellState): MvpShellState {
+  if (!backendState.designDoc || !localState.designDoc || !isSameDesignDoc(backendState.designDoc, localState.designDoc)) {
+    return backendState
+  }
+
+  return {
+    ...backendState,
+    designDocApprovedAt: localState.designDocApprovedAt,
+    verificationProperties: localState.verificationProperties,
+    verificationPropertiesApprovedAt: localState.verificationPropertiesApprovedAt,
   }
 }
 
@@ -313,7 +456,7 @@ function extractPromptSubject(prompt: string): string {
   const normalized = prompt.trim().replace(/\s+/g, ' ')
   const withoutLead = normalized.replace(/^(build|create|design|make)\s+/i, '')
   const truncated = withoutLead.split(/\b(?:that|with|for|using|which|to)\b/i)[0]?.trim() || withoutLead
-  const withoutArticle = truncated.replace(/^(a|an|the)\s+/i, '')
+  const withoutArticle = truncated.replace(/^(a|an|the)\s+/i, '').replace(/[.!?;:]+$/g, '')
 
   if (!withoutArticle) {
     return 'MVP design doc'
@@ -329,6 +472,46 @@ function splitLines(value: string): string[] {
     .filter(Boolean)
 }
 
+function deriveVerificationProperties(designDoc: MvpDesignDoc, nowIso: string): VerificationProperty[] {
+  const title = designDoc.title.trim() || 'MVP'
+  const primaryRequirement = designDoc.coreRequirements[0] ?? 'The approved Design Doc requirements are preserved.'
+  const missingInformation =
+    designDoc.missingInformation.length > 0
+      ? 'Open questions are resolved by the user or explicitly defaulted before generation.'
+      : 'The approved Design Doc has no unresolved missing-information items.'
+
+  return [
+    {
+      id: `prop_request_preserved_${nowIso}`,
+      label: 'Property 01',
+      statement: `${title} generation preserves the approved goal and core requirements.`,
+      rationale: 'Prevents CVLR generation from drifting away from the Design Doc the user approved.',
+    },
+    {
+      id: `prop_primary_requirement_${nowIso}`,
+      label: 'Property 02',
+      statement: primaryRequirement,
+      rationale: 'Turns the highest-priority requirement into an explicit proof target before generation.',
+    },
+    {
+      id: `prop_missing_information_${nowIso}`,
+      label: 'Property 03',
+      statement: missingInformation,
+      rationale: 'Keeps assumptions and open questions visible before AI Composer/CVLR work starts.',
+    },
+  ]
+}
+
+function isSameDesignDoc(left: MvpDesignDoc, right: MvpDesignDoc) {
+  return (
+    left.title === right.title &&
+    left.goal === right.goal &&
+    left.coreRequirements.join('\n') === right.coreRequirements.join('\n') &&
+    left.assumptions.join('\n') === right.assumptions.join('\n') &&
+    left.missingInformation.join('\n') === right.missingInformation.join('\n')
+  )
+}
+
 function renderBulletList(entries: string[]): string[] {
   return entries.map((entry) => `- ${entry}`)
 }
@@ -342,7 +525,11 @@ function isChatMessage(value: unknown): value is ChatMessage {
   return (
     typeof candidate.id === 'string' &&
     (candidate.side === 'user' || candidate.side === 'app') &&
-    typeof candidate.text === 'string'
+    typeof candidate.text === 'string' &&
+    (candidate.source === undefined ||
+      candidate.source === 'main' ||
+      candidate.source === 'prompt_seed' ||
+      candidate.source === 'suggestion')
   )
 }
 
@@ -353,6 +540,16 @@ function isPromptSeed(value: unknown): value is MvpProjectSeed {
 
   const candidate = value as Partial<MvpProjectSeed>
   return typeof candidate.prompt === 'string' && typeof candidate.updatedAt === 'string'
+}
+
+function normalizeWorkflowMode(value: unknown): WorkflowMode {
+  if (value === 'vibe_coding' || value === 'Vibe') {
+    return 'vibe_coding'
+  }
+  if (value === 'professional_development' || value === 'Pro') {
+    return 'professional_development'
+  }
+  return DEFAULT_WORKFLOW_MODE
 }
 
 function isDesignDoc(value: unknown): value is MvpDesignDoc {
@@ -374,6 +571,37 @@ function isDesignDoc(value: unknown): value is MvpDesignDoc {
   )
 }
 
+function isSuggestion(value: unknown): value is Suggestion {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<Suggestion>
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.label === 'string' &&
+    typeof candidate.title === 'string' &&
+    typeof candidate.body === 'string' &&
+    typeof candidate.detail === 'string' &&
+    typeof candidate.impact === 'string' &&
+    typeof candidate.createdAt === 'string'
+  )
+}
+
+function isVerificationProperty(value: unknown): value is VerificationProperty {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<VerificationProperty>
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.label === 'string' &&
+    typeof candidate.statement === 'string' &&
+    typeof candidate.rationale === 'string'
+  )
+}
+
 function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
   if (!value || typeof value !== 'object') {
     return false
@@ -391,6 +619,15 @@ function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
     candidate.artifactRefs.every((entry) => typeof entry === 'string') &&
     Array.isArray(candidate.artifacts) &&
     candidate.artifacts.every(isGenerationArtifactRecord) &&
+    (candidate.currentPhase === undefined || candidate.currentPhase === null || typeof candidate.currentPhase === 'string') &&
+    (candidate.progressSummary === undefined || candidate.progressSummary === null || typeof candidate.progressSummary === 'string') &&
+    (candidate.startedAt === undefined || candidate.startedAt === null || typeof candidate.startedAt === 'string') &&
+    (candidate.finishedAt === undefined || candidate.finishedAt === null || typeof candidate.finishedAt === 'string') &&
+    (candidate.lastHeartbeatAt === undefined || candidate.lastHeartbeatAt === null || typeof candidate.lastHeartbeatAt === 'string') &&
+    (candidate.aiComposerThreadId === undefined || candidate.aiComposerThreadId === null || typeof candidate.aiComposerThreadId === 'string') &&
+    (candidate.lastCheckpointId === undefined || candidate.lastCheckpointId === null || typeof candidate.lastCheckpointId === 'string') &&
+    (candidate.latestLogExcerpt === undefined || candidate.latestLogExcerpt === null || typeof candidate.latestLogExcerpt === 'string') &&
+    (candidate.lastMaterializedSnapshotAt === undefined || candidate.lastMaterializedSnapshotAt === null || typeof candidate.lastMaterializedSnapshotAt === 'string') &&
     (candidate.providerLabel === undefined || candidate.providerLabel === null || typeof candidate.providerLabel === 'string') &&
     (candidate.modelLabel === undefined || candidate.modelLabel === null || typeof candidate.modelLabel === 'string')
   )
@@ -413,6 +650,16 @@ function normalizeGenerationJobRecord(value: unknown): GenerationJobRecord | nul
     statusUrl: typeof candidate.statusUrl === 'string' ? candidate.statusUrl : '',
     createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : '',
     updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : '',
+    currentPhase: typeof candidate.currentPhase === 'string' ? candidate.currentPhase : null,
+    progressSummary: typeof candidate.progressSummary === 'string' ? candidate.progressSummary : null,
+    startedAt: typeof candidate.startedAt === 'string' ? candidate.startedAt : null,
+    finishedAt: typeof candidate.finishedAt === 'string' ? candidate.finishedAt : null,
+    lastHeartbeatAt: typeof candidate.lastHeartbeatAt === 'string' ? candidate.lastHeartbeatAt : null,
+    aiComposerThreadId: typeof candidate.aiComposerThreadId === 'string' ? candidate.aiComposerThreadId : null,
+    lastCheckpointId: typeof candidate.lastCheckpointId === 'string' ? candidate.lastCheckpointId : null,
+    latestLogExcerpt: typeof candidate.latestLogExcerpt === 'string' ? candidate.latestLogExcerpt : null,
+    lastMaterializedSnapshotAt:
+      typeof candidate.lastMaterializedSnapshotAt === 'string' ? candidate.lastMaterializedSnapshotAt : null,
     artifactRefs: Array.isArray(candidate.artifactRefs) ? candidate.artifactRefs.filter((entry): entry is string => typeof entry === 'string') : [],
     artifacts: Array.isArray(candidate.artifacts) ? candidate.artifacts.filter(isGenerationArtifactRecord) : [],
     providerLabel: typeof candidate.providerLabel === 'string' ? candidate.providerLabel : null,

@@ -4,11 +4,15 @@ import { StatusBar } from 'expo-status-bar'
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native'
 import { useMobileWallet } from '@wallet-ui/react-native-kit'
 import {
+  approveDesignDoc,
+  approveVerificationProperties,
   buildGenerationRequest,
   createInitialMvpShellState,
+  getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
   hasRenderableGenerationResult,
+  mergeBackendProjectState,
   restoreMvpShellState,
   saveGenerationJob,
   serializeMvpShellState,
@@ -18,66 +22,32 @@ import {
   type GenerationJobRecord,
   type MvpDesignDoc,
   type MvpProjectSeed,
+  type Suggestion,
+  type VerificationProperty,
+  type WorkflowMode,
   updateDesignDocField,
   updateDesignDocListField,
+  updateWorkflowMode,
 } from '../features/mvp-shell/model'
+import {
+  applyVibeDefaultsToProject,
+  capturePromptToProject,
+  listProjects,
+  readProjectSnapshot,
+  saveDesignDocToProject,
+  sendProjectChatMessage,
+  updateProjectWorkflowMode,
+} from '../features/mvp-shell/backend'
 import { readGenerationJobStatus, submitGenerationJob } from '../features/mvp-shell/generation'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
-type WorkflowMode = 'Vibe' | 'Pro'
+type DisplayWorkflowMode = 'Vibe' | 'Pro'
 type ExploreTab = 'projects' | 'properties'
 type AppSettings = {
   certoraApiKey: string
   easAuth: string
   expoAccount: string
 }
-type Suggestion = {
-  id: string
-  label: string
-  title: string
-  body: string
-  detail: string
-  impact: string
-}
-
-const suggestions: Suggestion[] = [
-  {
-    id: 'buyer-pause',
-    label: 'Suggestion 01',
-    title: 'Buyer pauses alone',
-    body: 'Resolve the blocker quickly, then review dispute abuse risk.',
-    detail:
-      'This keeps the happy path fast but needs a bounded pause window and a penalty rule before generation should proceed.',
-    impact: 'Fastest unblock',
-  },
-  {
-    id: 'mutual-pause',
-    label: 'Suggestion 02',
-    title: 'Mutual pause lock',
-    body: 'Require both parties before funded milestones can stop.',
-    detail: 'This is stronger for neutrality, but the program spec needs an escape hatch when one party disappears.',
-    impact: 'Safer default',
-  },
-  {
-    id: 'arbiter-pause',
-    label: 'Suggestion 03',
-    title: 'Arbiter can pause',
-    body: 'Route disputes through a recognized reviewer wallet.',
-    detail:
-      'This supports a service-work marketplace model, but the trust model must be named before verification properties can be inferred.',
-    impact: 'Best for review',
-  },
-  {
-    id: 'timed-release',
-    label: 'Suggestion 04',
-    title: 'Timed release rule',
-    body: 'Let funds release after a deadline unless a dispute exists.',
-    detail:
-      'This adds liveness to the escrow flow and creates a clean property target for deadline and dispute invariants.',
-    impact: 'Good property target',
-  },
-]
-
 const projects = [
   {
     name: 'Escrow Lens',
@@ -140,6 +110,7 @@ const propertyGuides = [
 
 const stages = ['Clarify', 'Props', 'Gen', 'Verify', 'Deploy', 'Record']
 const MVP_SHELL_STORAGE_KEY = 'verified-spec-dev.mvp-shell'
+const ACTIVE_PROJECT_STORAGE_KEY = 'verified-spec-dev.active-project'
 const LOCAL_BACKEND_BASE_URL = 'http://10.0.2.2:8000'
 
 function getWalletErrorMessage(error: unknown) {
@@ -152,14 +123,22 @@ function getWalletErrorMessage(error: unknown) {
   return 'Wallet action failed. Try again from your wallet.'
 }
 
+function toDisplayWorkflowMode(workflowMode: WorkflowMode): DisplayWorkflowMode {
+  return workflowMode === 'vibe_coding' ? 'Vibe' : 'Pro'
+}
+
+function toCanonicalWorkflowMode(mode: DisplayWorkflowMode): WorkflowMode {
+  return mode === 'Vibe' ? 'vibe_coding' : 'professional_development'
+}
+
 export function SpecDrivenApp() {
   const { account, connect, disconnect } = useMobileWallet()
   const [activeTab, setActiveTab] = useState<PrimaryTab>('chat')
-  const [mode, setMode] = useState<WorkflowMode>('Pro')
   const [suggestionPage, setSuggestionPage] = useState(0)
   const [selectedSuggestion, setSelectedSuggestion] = useState<Suggestion | null>(null)
   const [mvpState, setMvpState] = useState(createInitialMvpShellState)
   const [hasLoadedMvpState, setHasLoadedMvpState] = useState(false)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [followUpDraft, setFollowUpDraft] = useState('')
   const [followUpNote, setFollowUpNote] = useState('')
@@ -168,7 +147,10 @@ export function SpecDrivenApp() {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [isSubmittingGeneration, setIsSubmittingGeneration] = useState(false)
   const [isRefreshingGenerationStatus, setIsRefreshingGenerationStatus] = useState(false)
+  const [isSendingFollowUp, setIsSendingFollowUp] = useState(false)
+  const [isApplyingVibeDefaults, setIsApplyingVibeDefaults] = useState(false)
   const generationSubmitLock = useRef(false)
+  const designDocSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [appSettings, setAppSettings] = useState<AppSettings>({
     certoraApiKey: '',
     easAuth: '',
@@ -176,8 +158,20 @@ export function SpecDrivenApp() {
   })
 
   const accountAddress = account?.address.toString()
-  const visibleSuggestions = suggestions.slice(suggestionPage * 2, suggestionPage * 2 + 2)
+  const suggestionPageCount = Math.max(1, Math.ceil(mvpState.suggestions.length / 2))
+  const normalizedSuggestionPage = Math.min(suggestionPage, suggestionPageCount - 1)
+  const visibleSuggestions = mvpState.suggestions.slice(normalizedSuggestionPage * 2, normalizedSuggestionPage * 2 + 2)
+  const displayMode = toDisplayWorkflowMode(mvpState.workflowMode)
   const screenKey = `${activeTab}-${selectedSuggestion ? selectedSuggestion.id : 'main'}-${exploreTab}`
+
+  useEffect(() => {
+    if (suggestionPage !== normalizedSuggestionPage) {
+      setSuggestionPage(normalizedSuggestionPage)
+    }
+    if (selectedSuggestion && !mvpState.suggestions.some((suggestion) => suggestion.id === selectedSuggestion.id)) {
+      setSelectedSuggestion(null)
+    }
+  }, [mvpState.suggestions, normalizedSuggestionPage, selectedSuggestion, suggestionPage])
 
   useEffect(() => {
     let isCancelled = false
@@ -186,9 +180,13 @@ export function SpecDrivenApp() {
       try {
         const storedValue = await AsyncStorage.getItem(MVP_SHELL_STORAGE_KEY)
         const restoredState = restoreMvpShellState(storedValue)
+        const storedProjectId = await AsyncStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)
 
         if (!isCancelled && restoredState) {
           setMvpState(restoredState)
+        }
+        if (!isCancelled && storedProjectId) {
+          setActiveProjectId(storedProjectId)
         }
       } finally {
         if (!isCancelled) {
@@ -210,7 +208,94 @@ export function SpecDrivenApp() {
     }
 
     void AsyncStorage.setItem(MVP_SHELL_STORAGE_KEY, serializeMvpShellState(mvpState))
-  }, [hasLoadedMvpState, mvpState])
+    void AsyncStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProjectId ?? '')
+  }, [activeProjectId, hasLoadedMvpState, mvpState])
+
+  useEffect(() => {
+    if (!hasLoadedMvpState) {
+      return
+    }
+
+    let isCancelled = false
+
+    async function hydrateFromBackend() {
+      try {
+        if (activeProjectId) {
+          const snapshot = await readProjectSnapshot({
+            backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+            projectId: activeProjectId,
+          })
+          if (!isCancelled) {
+            setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
+            setActiveProjectId(snapshot.projectId)
+          }
+          return
+        }
+
+        const projectIds = await listProjects(LOCAL_BACKEND_BASE_URL)
+        if (!projectIds.length) {
+          return
+        }
+        const snapshot = await readProjectSnapshot({
+          backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+          projectId: projectIds[0],
+        })
+        if (!isCancelled) {
+          setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
+          setActiveProjectId(snapshot.projectId)
+        }
+      } catch {
+        // Keep local cache when backend data is unavailable.
+      }
+    }
+
+    void hydrateFromBackend()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [activeProjectId, hasLoadedMvpState])
+
+  useEffect(() => {
+    if (!hasLoadedMvpState || !activeProjectId || !mvpState.designDoc) {
+      return
+    }
+
+    if (designDocSaveTimer.current) {
+      clearTimeout(designDocSaveTimer.current)
+    }
+
+    designDocSaveTimer.current = setTimeout(() => {
+      void saveDesignDocToProject({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+        designDoc: mvpState.designDoc!,
+      }).catch(() => {
+        // Preserve local edits if the backend is unavailable.
+      })
+    }, 500)
+
+    return () => {
+      if (designDocSaveTimer.current) {
+        clearTimeout(designDocSaveTimer.current)
+      }
+    }
+  }, [activeProjectId, hasLoadedMvpState, mvpState.designDoc])
+
+  useEffect(() => {
+    const job = mvpState.generationJob
+    if (!job || !isActiveGenerationJob(job.status)) {
+      return
+    }
+
+    const timer = setInterval(() => {
+      void handleGenerationRefresh()
+    }, 15000)
+
+    return () => {
+      clearInterval(timer)
+    }
+  }, [mvpState.generationJob?.jobId, mvpState.generationJob?.status, isRefreshingGenerationStatus])
 
   async function handleWalletPress() {
     setWalletError(null)
@@ -226,11 +311,70 @@ export function SpecDrivenApp() {
     }
   }
 
-  function handleSendMessage() {
-    setMvpState((currentState) =>
-      submitPrompt(currentState, draft, () => `message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, new Date().toISOString())
-    )
+  async function handleSendMessage() {
+    const prompt = draft.trim()
+    if (!prompt) {
+      return
+    }
+
+    try {
+      const snapshot = await capturePromptToProject({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+        prompt,
+        workflowMode: mvpState.workflowMode,
+      })
+      setMvpState(snapshot.state)
+      setActiveProjectId(snapshot.projectId)
+    } catch {
+      setMvpState((currentState) =>
+        submitPrompt(currentState, prompt, () => `message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, new Date().toISOString())
+      )
+    }
     setDraft('')
+  }
+
+  async function handleModeChange(nextMode: DisplayWorkflowMode) {
+    const workflowMode = toCanonicalWorkflowMode(nextMode)
+    setMvpState((currentState) => updateWorkflowMode(currentState, workflowMode))
+    setGenerationError(null)
+
+    if (!activeProjectId) {
+      return
+    }
+
+    try {
+      const snapshot = await updateProjectWorkflowMode({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+        workflowMode,
+      })
+      setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
+      setActiveProjectId(snapshot.projectId)
+    } catch {
+      setGenerationError('Workflow mode is saved locally. Backend mode save is unavailable right now.')
+    }
+  }
+
+  async function handleApplyVibeDefaults() {
+    if (!activeProjectId || isApplyingVibeDefaults) {
+      return
+    }
+
+    setGenerationError(null)
+    setIsApplyingVibeDefaults(true)
+    try {
+      const snapshot = await applyVibeDefaultsToProject({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+      })
+      setMvpState(snapshot.state)
+      setActiveProjectId(snapshot.projectId)
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : 'AI defaults are unavailable right now.')
+    } finally {
+      setIsApplyingVibeDefaults(false)
+    }
   }
 
   function handleSuggestionPress(suggestion: Suggestion) {
@@ -239,13 +383,40 @@ export function SpecDrivenApp() {
     setFollowUpNote('')
   }
 
-  function handleFollowUpSend() {
-    if (!followUpDraft.trim()) {
+  async function handleFollowUpSend() {
+    const message = followUpDraft.trim()
+    if (!message || isSendingFollowUp) {
       return
     }
 
-    setFollowUpNote('Follow-up note captured locally. A backend proposal context is still required.')
-    setFollowUpDraft('')
+    if (!activeProjectId) {
+      setFollowUpNote('Submit a project prompt in Chat before discussing a suggestion.')
+      return
+    }
+
+    setIsSendingFollowUp(true)
+    setFollowUpNote('Sending follow-up to the backend...')
+
+    try {
+      const snapshot = await sendProjectChatMessage({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
+        message,
+        context: {
+          source: selectedSuggestion ? 'suggestion' : 'main',
+          suggestionId: selectedSuggestion?.id,
+          suggestionTitle: selectedSuggestion?.title,
+        },
+      })
+      setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
+      setActiveProjectId(snapshot.projectId)
+      setFollowUpDraft('')
+      setFollowUpNote('Backend reply added to the project chat.')
+    } catch {
+      setFollowUpNote('Backend clarification is unavailable right now. Try again when the backend is reachable.')
+    } finally {
+      setIsSendingFollowUp(false)
+    }
   }
 
   function updateAppSetting(key: keyof AppSettings, value: string) {
@@ -253,6 +424,20 @@ export function SpecDrivenApp() {
       ...currentSettings,
       [key]: value,
     }))
+  }
+
+  function handleReviewDesignDoc() {
+    setActiveTab('workspace')
+  }
+
+  function handleApproveDesignDoc() {
+    setGenerationError(null)
+    setMvpState((currentState) => approveDesignDoc(currentState, new Date().toISOString()))
+  }
+
+  function handleApproveVerificationProperties() {
+    setGenerationError(null)
+    setMvpState((currentState) => approveVerificationProperties(currentState, new Date().toISOString()))
   }
 
   async function handleGenerationSubmit() {
@@ -265,6 +450,11 @@ export function SpecDrivenApp() {
       setGenerationError('Create or restore an MVP Design Doc before generation can start.')
       return
     }
+    const generationBlocker = getGenerationBlocker(mvpState)
+    if (generationBlocker) {
+      setGenerationError(generationBlocker)
+      return
+    }
 
     setGenerationError(null)
     generationSubmitLock.current = true
@@ -273,6 +463,7 @@ export function SpecDrivenApp() {
     try {
       const job = await submitGenerationJob({
         backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        projectId: activeProjectId,
         request,
       })
 
@@ -306,11 +497,11 @@ export function SpecDrivenApp() {
   }
 
   function showPreviousSuggestions() {
-    setSuggestionPage((currentPage) => (currentPage === 0 ? 1 : 0))
+    setSuggestionPage((currentPage) => (currentPage <= 0 ? suggestionPageCount - 1 : currentPage - 1))
   }
 
   function showNextSuggestions() {
-    setSuggestionPage((currentPage) => (currentPage === 1 ? 0 : 1))
+    setSuggestionPage((currentPage) => (currentPage + 1 >= suggestionPageCount ? 0 : currentPage + 1))
   }
 
   return (
@@ -345,20 +536,20 @@ export function SpecDrivenApp() {
                 draft={draft}
                 followUpDraft={followUpDraft}
                 followUpNote={followUpNote}
-                latestPromptSeed={mvpState.latestPromptSeed}
+                hasDesignDoc={Boolean(mvpState.designDoc)}
+                isSendingFollowUp={isSendingFollowUp}
                 messages={mvpState.messages}
                 selectedSuggestion={selectedSuggestion}
-                suggestionPage={suggestionPage}
+                suggestionCount={mvpState.suggestions.length}
+                suggestionPage={normalizedSuggestionPage}
                 visibleSuggestions={visibleSuggestions}
-                generationJob={mvpState.generationJob}
-                isRefreshingGenerationStatus={isRefreshingGenerationStatus}
                 onBackFromSuggestion={() => setSelectedSuggestion(null)}
                 onChangeDraft={setDraft}
                 onChangeFollowUpDraft={setFollowUpDraft}
                 onFollowUpSend={handleFollowUpSend}
-                onRefreshGenerationStatus={handleGenerationRefresh}
                 onNextSuggestions={showNextSuggestions}
                 onPreviousSuggestions={showPreviousSuggestions}
+                onReviewDesignDoc={handleReviewDesignDoc}
                 onSendMessage={handleSendMessage}
                 onSuggestionPress={handleSuggestionPress}
               />
@@ -369,14 +560,21 @@ export function SpecDrivenApp() {
                 accountAddress={accountAddress}
                 appSettings={appSettings}
                 designDoc={mvpState.designDoc}
+                designDocApprovedAt={mvpState.designDocApprovedAt}
                 latestPromptSeed={mvpState.latestPromptSeed}
-                mode={mode}
+                mode={displayMode}
+                verificationProperties={mvpState.verificationProperties}
+                verificationPropertiesApprovedAt={mvpState.verificationPropertiesApprovedAt}
+                workflowMode={mvpState.workflowMode}
                 walletConnected={Boolean(account)}
                 generationError={generationError}
                 generationJob={mvpState.generationJob}
+                isApplyingVibeDefaults={isApplyingVibeDefaults}
                 isRefreshingGenerationStatus={isRefreshingGenerationStatus}
                 isSubmittingGeneration={isSubmittingGeneration}
                 onAppSettingChange={updateAppSetting}
+                onApproveDesignDoc={handleApproveDesignDoc}
+                onApproveVerificationProperties={handleApproveVerificationProperties}
                 onDesignDocFieldChange={(field, value) =>
                   setMvpState((currentState) => updateDesignDocField(currentState, field, value))
                 }
@@ -385,7 +583,8 @@ export function SpecDrivenApp() {
                 }
                 onGenerationSubmit={handleGenerationSubmit}
                 onGenerationRefresh={handleGenerationRefresh}
-                onModeChange={setMode}
+                onApplyVibeDefaults={handleApplyVibeDefaults}
+                onModeChange={handleModeChange}
                 onWalletPress={handleWalletPress}
               />
             ) : null}
@@ -453,40 +652,40 @@ function ChatView({
   draft,
   followUpDraft,
   followUpNote,
-  generationJob,
-  isRefreshingGenerationStatus,
-  latestPromptSeed,
+  hasDesignDoc,
+  isSendingFollowUp,
   messages,
   selectedSuggestion,
+  suggestionCount,
   suggestionPage,
   visibleSuggestions,
   onBackFromSuggestion,
   onChangeDraft,
   onChangeFollowUpDraft,
   onFollowUpSend,
-  onRefreshGenerationStatus,
   onNextSuggestions,
   onPreviousSuggestions,
+  onReviewDesignDoc,
   onSendMessage,
   onSuggestionPress,
 }: {
   draft: string
   followUpDraft: string
   followUpNote: string
-  generationJob: GenerationJobRecord | null
-  isRefreshingGenerationStatus: boolean
-  latestPromptSeed: MvpProjectSeed | null
+  hasDesignDoc: boolean
+  isSendingFollowUp: boolean
   messages: ChatMessage[]
   selectedSuggestion: Suggestion | null
+  suggestionCount: number
   suggestionPage: number
   visibleSuggestions: Suggestion[]
   onBackFromSuggestion: () => void
   onChangeDraft: (value: string) => void
   onChangeFollowUpDraft: (value: string) => void
   onFollowUpSend: () => void
-  onRefreshGenerationStatus: () => void
   onNextSuggestions: () => void
   onPreviousSuggestions: () => void
+  onReviewDesignDoc: () => void
   onSendMessage: () => void
   onSuggestionPress: (suggestion: Suggestion) => void
 }) {
@@ -495,6 +694,7 @@ function ChatView({
       <SuggestionFollowUpView
         draft={followUpDraft}
         note={followUpNote}
+        isSending={isSendingFollowUp}
         suggestion={selectedSuggestion}
         onBack={onBackFromSuggestion}
         onChangeDraft={onChangeFollowUpDraft}
@@ -503,50 +703,70 @@ function ChatView({
     )
   }
 
+  const hasUserPrompt = messages.some((message) => message.side === 'user')
+
   return (
     <View className="flex-1 justify-between gap-3">
       <View className="gap-3">
-        <PromptSeedCard latestPromptSeed={latestPromptSeed} />
-        <GenerationStatusCard
-          generationJob={generationJob}
-          isRefreshing={isRefreshingGenerationStatus}
-          onRefresh={onRefreshGenerationStatus}
-        />
-
         <View className="gap-2">
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
         </View>
 
-        <View className="gap-2">
-          <View className="flex-row items-center justify-between gap-3">
-            <Text numberOfLines={1} className="min-w-0 flex-1 text-xs font-bold uppercase tracking-wide text-[#ffd978]">
-              Suggestions
-            </Text>
-            <Text className="text-xs font-bold text-[#fff4cf]/55">{suggestionPage === 0 ? '1-2' : '3-4'} of 4</Text>
-          </View>
-          <View className="flex-row items-stretch gap-2">
-            <RailArrow label="<" onPress={onPreviousSuggestions} />
-            <View className="flex-1 flex-row gap-2">
-              {visibleSuggestions.map((suggestion) => (
-                <Pressable
-                  key={suggestion.id}
-                  accessibilityRole="button"
-                  onPress={() => onSuggestionPress(suggestion)}
-                  className="min-h-32 flex-1 gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3 active:border-[#ffd978]/40 active:bg-[#372647]"
-                >
-                  <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">
-                    {suggestion.label}
-                  </Text>
-                  <Text className="text-base font-black leading-5 text-[#fff4cf]">{suggestion.title}</Text>
-                  <Text className="text-xs leading-5 text-[#fff4cf]/65">{suggestion.body}</Text>
-                </Pressable>
-              ))}
+        {hasDesignDoc ? (
+          <View className="gap-3 rounded-lg border border-[#9db4ff]/25 bg-[#9db4ff]/10 p-3">
+            <View className="flex-row items-start justify-between gap-3">
+              <View className="min-w-0 flex-1">
+                <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Workspace review</Text>
+                <Text className="mt-1 text-base font-black text-[#eef2ff]">Design Doc is ready</Text>
+                <Text className="mt-1 text-sm leading-5 text-[#eef2ff]/70">
+                  Review and approve it in Workspace before properties are proposed.
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                onPress={onReviewDesignDoc}
+                className="rounded-full bg-[#ffd978] px-4 py-2 active:bg-[#ffe6a3]"
+              >
+                <Text className="text-xs font-black text-[#201626]">Review</Text>
+              </Pressable>
             </View>
-            <RailArrow label=">" onPress={onNextSuggestions} />
           </View>
-        </View>
+        ) : null}
+
+        {hasUserPrompt && suggestionCount > 0 ? (
+          <View className="gap-2">
+            <View className="flex-row items-center justify-between gap-3">
+              <Text numberOfLines={1} className="min-w-0 flex-1 text-xs font-bold uppercase tracking-wide text-[#ffd978]">
+                Suggestions
+              </Text>
+              <Text className="text-xs font-bold text-[#fff4cf]/55">
+                {suggestionPage * 2 + 1}-{Math.min(suggestionPage * 2 + visibleSuggestions.length, suggestionCount)} of {suggestionCount}
+              </Text>
+            </View>
+            <View className="flex-row items-stretch gap-2">
+              <RailArrow label="<" onPress={onPreviousSuggestions} />
+              <View className="flex-1 flex-row gap-2">
+                {visibleSuggestions.map((suggestion) => (
+                  <Pressable
+                    key={suggestion.id}
+                    accessibilityRole="button"
+                    onPress={() => onSuggestionPress(suggestion)}
+                    className="min-h-32 flex-1 gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3 active:border-[#ffd978]/40 active:bg-[#372647]"
+                  >
+                    <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">
+                      {suggestion.label}
+                    </Text>
+                    <Text className="text-base font-black leading-5 text-[#fff4cf]">{suggestion.title}</Text>
+                    <Text className="text-xs leading-5 text-[#fff4cf]/65">{suggestion.body}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <RailArrow label=">" onPress={onNextSuggestions} />
+            </View>
+          </View>
+        ) : null}
       </View>
 
       <Composer
@@ -561,6 +781,7 @@ function ChatView({
 
 function SuggestionFollowUpView({
   draft,
+  isSending,
   note,
   suggestion,
   onBack,
@@ -568,6 +789,7 @@ function SuggestionFollowUpView({
   onSend,
 }: {
   draft: string
+  isSending: boolean
   note: string
   suggestion: Suggestion
   onBack: () => void
@@ -609,6 +831,7 @@ function SuggestionFollowUpView({
 
       <Composer
         draft={draft}
+        isSending={isSending}
         placeholder="Discuss only this suggestion..."
         onChangeDraft={onChangeDraft}
         onSend={onSend}
@@ -617,10 +840,10 @@ function SuggestionFollowUpView({
   )
 }
 
-function ModeSwitch({ mode, onModeChange }: { mode: WorkflowMode; onModeChange: (value: WorkflowMode) => void }) {
+function ModeSwitch({ mode, onModeChange }: { mode: DisplayWorkflowMode; onModeChange: (value: DisplayWorkflowMode) => void }) {
   return (
     <View className="flex-row rounded-full border border-[#fff4cf]/10 bg-[#fff4cf]/10 p-1">
-      {(['Vibe', 'Pro'] as WorkflowMode[]).map((option) => {
+      {(['Vibe', 'Pro'] as DisplayWorkflowMode[]).map((option) => {
         const active = option === mode
 
         return (
@@ -636,91 +859,6 @@ function ModeSwitch({ mode, onModeChange }: { mode: WorkflowMode; onModeChange: 
           </Pressable>
         )
       })}
-    </View>
-  )
-}
-
-function PromptSeedCard({ latestPromptSeed }: { latestPromptSeed: MvpProjectSeed | null }) {
-  if (!latestPromptSeed) {
-    return (
-      <View className="gap-2 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">MVP prompt seed</Text>
-        <Text className="text-sm leading-5 text-[#dffdf4]/80">
-          Your first accepted prompt will be kept here and reused as the seed for the MVP Design Doc.
-        </Text>
-      </View>
-    )
-  }
-
-  return (
-    <View className="gap-2 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
-      <View className="flex-row items-start justify-between gap-3">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">MVP prompt seed</Text>
-        <Text className="text-[10px] font-bold uppercase tracking-wider text-[#dffdf4]/60">Saved locally</Text>
-      </View>
-      <Text className="text-sm font-semibold leading-5 text-[#dffdf4]">{latestPromptSeed.prompt}</Text>
-      <Text className="text-xs leading-4 text-[#dffdf4]/65">Latest capture: {formatSavedAt(latestPromptSeed.updatedAt)}</Text>
-    </View>
-  )
-}
-
-function GenerationStatusCard({
-  generationJob,
-  isRefreshing,
-  onRefresh,
-}: {
-  generationJob: GenerationJobRecord | null
-  isRefreshing: boolean
-  onRefresh: () => void
-}) {
-  if (!generationJob) {
-    return (
-      <View className="gap-2 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-3">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation job status</Text>
-        <Text className="text-sm leading-5 text-[#eef2ff]/80">
-          No backend generation job yet. Submit the MVP Design Doc from Workspace when you are ready.
-        </Text>
-      </View>
-    )
-  }
-
-  return (
-    <View className="gap-3 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-3">
-      <View className="flex-row items-start justify-between gap-3">
-        <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation job status</Text>
-          <Text className="text-sm font-semibold leading-5 text-[#eef2ff]">{generationJob.summary}</Text>
-        </View>
-        <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob.status)}`}>
-          <Text className="text-xs font-black text-[#dffdf4]">{getGenerationStatusLabel(generationJob.status)}</Text>
-        </View>
-      </View>
-      <Text selectable className="text-xs leading-5 text-[#eef2ff]/70">
-        Job id: {generationJob.jobId}
-      </Text>
-      <Text className="text-xs leading-5 text-[#eef2ff]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
-      {hasRenderableGenerationResult(generationJob) ? (
-        <GeneratedResultSummary
-          artifacts={generationJob.artifacts}
-          modelLabel={generationJob.modelLabel ?? null}
-          providerLabel={generationJob.providerLabel ?? null}
-          summary={generationJob.summary}
-        />
-      ) : null}
-      {getGenerationResultIssue(generationJob) ? (
-        <Text className="rounded-lg border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
-          {getGenerationResultIssue(generationJob)}
-        </Text>
-      ) : null}
-      <Pressable
-        accessibilityLabel="Refresh generation status"
-        accessibilityRole="button"
-        disabled={isRefreshing}
-        onPress={onRefresh}
-        className={`items-center rounded-full px-4 py-2 ${isRefreshing ? 'bg-[#9db4ff]/12' : 'bg-[#9db4ff]/22 active:bg-[#9db4ff]/30'}`}
-      >
-        <Text className="text-xs font-black text-[#eef2ff]">{isRefreshing ? 'Refreshing status...' : 'Refresh status'}</Text>
-      </Pressable>
     </View>
   )
 }
@@ -754,15 +892,19 @@ function RailArrow({ label, onPress }: { label: string; onPress: () => void }) {
 
 function Composer({
   draft,
+  isSending = false,
   placeholder,
   onChangeDraft,
   onSend,
 }: {
   draft: string
+  isSending?: boolean
   placeholder: string
   onChangeDraft: (value: string) => void
   onSend: () => void
 }) {
+  const canSend = Boolean(draft.trim()) && !isSending
+
   return (
     <View className="flex-row items-end gap-2 rounded-[24px] border border-[#fff4cf]/15 bg-[#fff4cf]/10 p-1.5">
       <Pressable
@@ -775,6 +917,7 @@ function Composer({
       <TextInput
         className="min-h-9 min-w-0 flex-1 px-1 py-2 text-sm font-semibold leading-5 text-[#fff4cf]"
         blurOnSubmit={false}
+        editable={!isSending}
         multiline
         onChangeText={onChangeDraft}
         onSubmitEditing={onSend}
@@ -788,8 +931,9 @@ function Composer({
       <Pressable
         accessibilityLabel="Send message"
         accessibilityRole="button"
+        disabled={!canSend}
         onPress={onSend}
-        className="h-9 w-9 items-center justify-center rounded-full bg-[#ffd978] active:bg-[#ffe6a3]"
+        className={`h-9 w-9 items-center justify-center rounded-full ${canSend ? 'bg-[#ffd978] active:bg-[#ffe6a3]' : 'bg-[#fff4cf]/20'}`}
       >
         <SendArrowIcon />
       </Pressable>
@@ -821,13 +965,21 @@ function WorkspaceView({
   accountAddress,
   appSettings,
   designDoc,
+  designDocApprovedAt,
   generationError,
   generationJob,
   isRefreshingGenerationStatus,
   isSubmittingGeneration,
+  isApplyingVibeDefaults,
   latestPromptSeed,
   mode,
+  verificationProperties,
+  verificationPropertiesApprovedAt,
+  workflowMode,
   onAppSettingChange,
+  onApplyVibeDefaults,
+  onApproveDesignDoc,
+  onApproveVerificationProperties,
   onDesignDocFieldChange,
   onDesignDocListFieldChange,
   onGenerationRefresh,
@@ -839,13 +991,21 @@ function WorkspaceView({
   accountAddress?: string
   appSettings: AppSettings
   designDoc: MvpDesignDoc | null
+  designDocApprovedAt: string | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
+  isApplyingVibeDefaults: boolean
   isRefreshingGenerationStatus: boolean
   isSubmittingGeneration: boolean
   latestPromptSeed: MvpProjectSeed | null
-  mode: WorkflowMode
+  mode: DisplayWorkflowMode
+  verificationProperties: VerificationProperty[]
+  verificationPropertiesApprovedAt: string | null
+  workflowMode: WorkflowMode
   onAppSettingChange: (key: keyof AppSettings, value: string) => void
+  onApplyVibeDefaults: () => void
+  onApproveDesignDoc: () => void
+  onApproveVerificationProperties: () => void
   onDesignDocFieldChange: (field: 'title' | 'goal', value: string) => void
   onDesignDocListFieldChange: (
     field: 'coreRequirements' | 'assumptions' | 'missingInformation',
@@ -853,7 +1013,7 @@ function WorkspaceView({
   ) => void
   onGenerationRefresh: () => void
   onGenerationSubmit: () => void
-  onModeChange: (value: WorkflowMode) => void
+  onModeChange: (value: DisplayWorkflowMode) => void
   onWalletPress: () => void
   walletConnected: boolean
 }) {
@@ -862,9 +1022,9 @@ function WorkspaceView({
       <View className="gap-3 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-4">
         <View className="flex-row items-start justify-between gap-3">
           <View className="min-w-0 flex-1">
-            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Current MVP seed</Text>
+            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Project request</Text>
             <Text className="mt-1 text-xl font-black leading-6 text-[#dffdf4]">
-              {latestPromptSeed ? 'Ready for Design Doc review' : 'Waiting for your first prompt'}
+              {latestPromptSeed ? 'Ready for Design Doc review' : 'Waiting for your first request'}
             </Text>
           </View>
           <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
@@ -874,20 +1034,33 @@ function WorkspaceView({
         <Text className="text-sm leading-6 text-[#dffdf4]/80">
           {latestPromptSeed
             ? latestPromptSeed.prompt
-            : 'Submit a project request in Chat. It will stay attached to the current project while you move between tabs.'}
+            : 'Describe what you want to build in Chat. Workspace will show the Design Doc once the backend drafts it.'}
         </Text>
       </View>
 
       <DesignDocCard
+        approvedAt={designDocApprovedAt}
         designDoc={designDoc}
         generationError={generationError}
         generationJob={generationJob}
+        isApplyingVibeDefaults={isApplyingVibeDefaults}
         isRefreshingGenerationStatus={isRefreshingGenerationStatus}
         isSubmittingGeneration={isSubmittingGeneration}
+        propertiesApprovedAt={verificationPropertiesApprovedAt}
+        workflowMode={workflowMode}
+        onApplyVibeDefaults={onApplyVibeDefaults}
+        onApprove={onApproveDesignDoc}
         onFieldChange={onDesignDocFieldChange}
         onRefresh={onGenerationRefresh}
         onGenerate={onGenerationSubmit}
         onListFieldChange={onDesignDocListFieldChange}
+      />
+
+      <PropertiesToProveCard
+        designDocApprovedAt={designDocApprovedAt}
+        properties={verificationProperties}
+        propertiesApprovedAt={verificationPropertiesApprovedAt}
+        onApprove={onApproveVerificationProperties}
       />
 
       <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
@@ -1014,27 +1187,67 @@ function getGenerationStatusBadgeClass(status: string) {
   }
 }
 
+function isActiveGenerationJob(status: string) {
+  return status === 'queued' || status === 'running'
+}
+
+function formatShortIdentifier(value: string | null | undefined) {
+  if (!value) {
+    return null
+  }
+  if (value.length <= 30) {
+    return value
+  }
+  return `${value.slice(0, 14)}...${value.slice(-10)}`
+}
+
 function DesignDocCard({
+  approvedAt,
   designDoc,
   generationError,
   generationJob,
+  isApplyingVibeDefaults,
   isRefreshingGenerationStatus,
   isSubmittingGeneration,
+  propertiesApprovedAt,
+  workflowMode,
+  onApplyVibeDefaults,
+  onApprove,
   onFieldChange,
   onRefresh,
   onGenerate,
   onListFieldChange,
 }: {
+  approvedAt: string | null
   designDoc: MvpDesignDoc | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
+  isApplyingVibeDefaults: boolean
   isRefreshingGenerationStatus: boolean
   isSubmittingGeneration: boolean
+  propertiesApprovedAt: string | null
+  workflowMode: WorkflowMode
+  onApplyVibeDefaults: () => void
+  onApprove: () => void
   onFieldChange: (field: 'title' | 'goal', value: string) => void
   onRefresh: () => void
   onGenerate: () => void
   onListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
 }) {
+  const missingInformationCount = designDoc?.missingInformation.length ?? 0
+  const hasMissingInformation = missingInformationCount > 0
+  const generationBlocked = isSubmittingGeneration || hasMissingInformation || !approvedAt || !propertiesApprovedAt
+  const modeLabel = toDisplayWorkflowMode(workflowMode)
+  const generationButtonLabel = isSubmittingGeneration
+    ? 'Submitting to backend...'
+    : hasMissingInformation
+      ? 'Resolve gate before generation'
+      : !approvedAt
+        ? 'Approve Design Doc first'
+        : !propertiesApprovedAt
+          ? 'Approve properties first'
+          : 'Generate MVP'
+
   if (!designDoc) {
     return (
       <View className="gap-2 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-4">
@@ -1054,11 +1267,13 @@ function DesignDocCard({
           <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
           <Text className="text-2xl font-black leading-7 text-[#eef2ff]">Editable review surface</Text>
           <Text className="text-sm leading-6 text-[#eef2ff]/70">
-            Review this single MVP artifact before backend generation is available.
+            Review and approve this single MVP artifact before properties are proposed.
           </Text>
         </View>
-        <View className="rounded-full bg-[#9db4ff]/15 px-3 py-2">
-          <Text className="text-xs font-black text-[#eef2ff]">1 doc</Text>
+        <View className={`rounded-full px-3 py-2 ${approvedAt ? 'bg-[#75e6be]/15' : 'bg-[#9db4ff]/15'}`}>
+          <Text className={`text-xs font-black ${approvedAt ? 'text-[#dffdf4]' : 'text-[#eef2ff]'}`}>
+            {approvedAt ? 'Approved' : '1 doc'}
+          </Text>
         </View>
       </View>
 
@@ -1092,6 +1307,58 @@ function DesignDocCard({
         onChangeText={(value) => onListFieldChange('missingInformation', value)}
       />
 
+      {hasMissingInformation ? (
+        <View className="gap-3 rounded-2xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd2bd]">Generation gate</Text>
+          <Text className="text-sm leading-5 text-[#ffd2bd]/85">
+            {modeLabel === 'Vibe'
+              ? 'Vibe can ask the backend to turn missing details into visible assumptions before generation.'
+              : 'Pro requires these missing details to be answered or edited away before generation.'}
+          </Text>
+          {modeLabel === 'Vibe' ? (
+            <Pressable
+              accessibilityLabel="Use AI defaults"
+              accessibilityRole="button"
+              disabled={isApplyingVibeDefaults}
+              onPress={onApplyVibeDefaults}
+              className={`items-center rounded-full px-4 py-2 ${isApplyingVibeDefaults ? 'bg-[#ffd978]/25' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
+            >
+              <Text className="text-xs font-black text-[#201626]">
+                {isApplyingVibeDefaults ? 'Applying defaults...' : 'Use AI defaults'}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      <View className="gap-3 rounded-2xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+        <View className="flex-row items-start justify-between gap-3">
+          <View className="min-w-0 flex-1 gap-1">
+            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Approval</Text>
+            <Text className="text-sm leading-5 text-[#dffdf4]/80">
+              {approvedAt
+                ? `Approved ${formatSavedAt(approvedAt)}. Editing the Design Doc will reset this approval.`
+                : 'Approve this Design Doc to propose properties and invariants before CVLR generation.'}
+            </Text>
+          </View>
+          {approvedAt ? (
+            <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
+              <Text className="text-xs font-black text-[#dffdf4]">Locked</Text>
+            </View>
+          ) : null}
+        </View>
+        {!approvedAt ? (
+          <Pressable
+            accessibilityLabel="Approve Design Doc"
+            accessibilityRole="button"
+            onPress={onApprove}
+            className="items-center rounded-full bg-[#75e6be] px-4 py-2 active:bg-[#9af2d7]"
+          >
+            <Text className="text-xs font-black text-[#0d3b35]">Approve Design Doc</Text>
+          </Pressable>
+        ) : null}
+      </View>
+
       <View className="gap-3 rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 p-3">
         <View className="flex-row items-start justify-between gap-3">
           <View className="min-w-0 flex-1 gap-1">
@@ -1117,7 +1384,38 @@ function DesignDocCard({
             <Text className="text-xs leading-5 text-[#dffdf4]/70">
               Status: {getGenerationStatusLabel(generationJob.status)}
             </Text>
+            {generationJob.currentPhase ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">Phase: {generationJob.currentPhase}</Text>
+            ) : null}
+            {generationJob.progressSummary ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">Progress: {generationJob.progressSummary}</Text>
+            ) : null}
             <Text className="text-xs leading-5 text-[#dffdf4]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+            {generationJob.lastHeartbeatAt ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">
+                Worker heartbeat: {formatSavedAt(generationJob.lastHeartbeatAt)}
+              </Text>
+            ) : null}
+            {generationJob.aiComposerThreadId ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">
+                AI Composer thread: {formatShortIdentifier(generationJob.aiComposerThreadId)}
+              </Text>
+            ) : null}
+            {generationJob.lastCheckpointId ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">
+                Latest checkpoint: {formatShortIdentifier(generationJob.lastCheckpointId)}
+              </Text>
+            ) : null}
+            {generationJob.lastMaterializedSnapshotAt ? (
+              <Text className="text-xs leading-5 text-[#dffdf4]/70">
+                Last safe snapshot: {formatSavedAt(generationJob.lastMaterializedSnapshotAt)}
+              </Text>
+            ) : null}
+            {generationJob.latestLogExcerpt ? (
+              <Text className="rounded-xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-2 text-xs leading-5 text-[#dffdf4]/72">
+                Latest status: {generationJob.latestLogExcerpt}
+              </Text>
+            ) : null}
             {hasRenderableGenerationResult(generationJob) ? (
               <GeneratedResultSummary
                 artifacts={generationJob.artifacts}
@@ -1154,17 +1452,90 @@ function DesignDocCard({
         <Pressable
           accessibilityLabel="Generate MVP"
           accessibilityRole="button"
-          disabled={isSubmittingGeneration}
+          disabled={generationBlocked}
           onPress={onGenerate}
-          className={`items-center rounded-full px-4 py-3 ${isSubmittingGeneration ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
+          className={`items-center rounded-full px-4 py-3 ${generationBlocked ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
         >
-          <Text className="text-sm font-black text-[#201626]">
-            {isSubmittingGeneration ? 'Submitting to backend...' : 'Generate MVP'}
-          </Text>
+          <Text className="text-sm font-black text-[#201626]">{generationButtonLabel}</Text>
         </Pressable>
       </View>
 
       <Text className="text-xs leading-5 text-[#eef2ff]/55">Last updated: {formatSavedAt(designDoc.updatedAt)}</Text>
+    </View>
+  )
+}
+
+function PropertiesToProveCard({
+  designDocApprovedAt,
+  properties,
+  propertiesApprovedAt,
+  onApprove,
+}: {
+  designDocApprovedAt: string | null
+  properties: VerificationProperty[]
+  propertiesApprovedAt: string | null
+  onApprove: () => void
+}) {
+  if (!designDocApprovedAt) {
+    return (
+      <View className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-4">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
+        <Text className="text-lg font-black text-[#fff4cf]">Waiting on Design Doc approval</Text>
+        <Text className="text-sm leading-6 text-[#fff4cf]/70">
+          Approve the Design Doc above before the app proposes properties and invariants for CVLR generation.
+        </Text>
+      </View>
+    )
+  }
+
+  const approved = Boolean(propertiesApprovedAt)
+
+  return (
+    <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
+          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Review before CVLR generation</Text>
+          <Text className="text-sm leading-6 text-[#fff4cf]/70">
+            These proof targets come from the approved Design Doc and must be approved before generation starts.
+          </Text>
+        </View>
+        <View className={`rounded-full px-3 py-2 ${approved ? 'bg-[#75e6be]/15' : 'bg-[#ffd978]/15'}`}>
+          <Text className={`text-xs font-black ${approved ? 'text-[#dffdf4]' : 'text-[#ffe6a3]'}`}>
+            {approved ? 'Approved' : `${properties.length} props`}
+          </Text>
+        </View>
+      </View>
+
+      <View className="gap-2">
+        {properties.map((property) => (
+          <View key={property.id} className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
+            <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">
+              {property.label}
+            </Text>
+            <Text className="text-sm font-black leading-5 text-[#fff4cf]">{property.statement}</Text>
+            <Text className="text-xs leading-5 text-[#fff4cf]/65">{property.rationale}</Text>
+          </View>
+        ))}
+      </View>
+
+      {propertiesApprovedAt ? (
+        <Text className="rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 px-3 py-2 text-sm leading-5 text-[#dffdf4]">
+          Approved {formatSavedAt(propertiesApprovedAt)}. Editing the Design Doc will reset these properties.
+        </Text>
+      ) : (
+        <Pressable
+          accessibilityLabel="Approve properties to prove"
+          accessibilityRole="button"
+          disabled={properties.length === 0}
+          onPress={onApprove}
+          className={`items-center rounded-full px-4 py-3 ${properties.length === 0 ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
+        >
+          <Text className="text-sm font-black text-[#201626]">
+            {properties.length === 0 ? 'No properties proposed yet' : 'Approve properties to prove'}
+          </Text>
+        </Pressable>
+      )}
     </View>
   )
 }
