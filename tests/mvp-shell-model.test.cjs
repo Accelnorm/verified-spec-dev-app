@@ -3,10 +3,12 @@ const test = require('node:test')
 
 const {
   MVP_CAPTURE_ACK,
-  saveGenerationJob,
   createInitialMvpShellState,
+  getGenerationResultIssue,
   getGenerationStatusLabel,
+  hasRenderableGenerationResult,
   restoreMvpShellState,
+  saveGenerationJob,
   serializeMvpShellState,
   submitPrompt,
   updateDesignDocField,
@@ -179,6 +181,10 @@ test('saveGenerationJob preserves the stable backend job id across serialization
     statusUrl: '/jobs/gen_626153431ac5aa23a5fafb40',
     createdAt: '2026-05-06T01:02:03Z',
     updatedAt: '2026-05-06T01:02:03Z',
+    artifactRefs: [],
+    artifacts: [],
+    providerLabel: null,
+    modelLabel: null,
   })
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
@@ -196,4 +202,64 @@ test('getGenerationStatusLabel collapses backend-specific failures into the trut
   assert.equal(getGenerationStatusLabel('canceled'), 'Failed')
   assert.equal(getGenerationStatusLabel('unavailable'), 'Unavailable')
   assert.equal(getGenerationStatusLabel('anything-else'), 'Unavailable')
+})
+
+test('hasRenderableGenerationResult only returns true for succeeded jobs with artifacts', () => {
+  assert.equal(
+    hasRenderableGenerationResult({
+      jobId: 'gen_result',
+      status: 'succeeded',
+      summary: 'AI Composer generation completed.',
+      statusUrl: '/jobs/gen_result',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+      artifactRefs: ['artifact_1'],
+      artifacts: [
+        {
+          artifactId: 'artifact_1',
+          name: 'program.so',
+          typeLabel: 'program_binary',
+          path: 'artifacts/program.so',
+          summary: 'Generated program binary.',
+        },
+      ],
+      providerLabel: 'zai',
+      modelLabel: 'glm-5.1',
+    }),
+    true
+  )
+
+  assert.equal(
+    hasRenderableGenerationResult({
+      jobId: 'gen_missing_artifacts',
+      status: 'succeeded',
+      summary: 'AI Composer generation completed.',
+      statusUrl: '/jobs/gen_missing_artifacts',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+      artifactRefs: [],
+      artifacts: [],
+      providerLabel: null,
+      modelLabel: null,
+    }),
+    false
+  )
+})
+
+test('getGenerationResultIssue surfaces a backend-result issue when success arrives without artifacts', () => {
+  assert.equal(
+    getGenerationResultIssue({
+      jobId: 'gen_missing_artifacts',
+      status: 'succeeded',
+      summary: 'AI Composer generation completed.',
+      statusUrl: '/jobs/gen_missing_artifacts',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+      artifactRefs: [],
+      artifacts: [],
+      providerLabel: null,
+      modelLabel: null,
+    }),
+    'Backend returned a succeeded generation without generated artifacts.'
+  )
 })

@@ -6,11 +6,14 @@ import { useMobileWallet } from '@wallet-ui/react-native-kit'
 import {
   buildGenerationRequest,
   createInitialMvpShellState,
+  getGenerationResultIssue,
   getGenerationStatusLabel,
+  hasRenderableGenerationResult,
   restoreMvpShellState,
   saveGenerationJob,
   serializeMvpShellState,
   submitPrompt,
+  type GenerationArtifactRecord,
   type ChatMessage,
   type GenerationJobRecord,
   type MvpDesignDoc,
@@ -696,6 +699,19 @@ function GenerationStatusCard({
         Job id: {generationJob.jobId}
       </Text>
       <Text className="text-xs leading-5 text-[#eef2ff]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+      {hasRenderableGenerationResult(generationJob) ? (
+        <GeneratedResultSummary
+          artifacts={generationJob.artifacts}
+          modelLabel={generationJob.modelLabel ?? null}
+          providerLabel={generationJob.providerLabel ?? null}
+          summary={generationJob.summary}
+        />
+      ) : null}
+      {getGenerationResultIssue(generationJob) ? (
+        <Text className="rounded-lg border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
+          {getGenerationResultIssue(generationJob)}
+        </Text>
+      ) : null}
       <Pressable
         accessibilityLabel="Refresh generation status"
         accessibilityRole="button"
@@ -1102,6 +1118,19 @@ function DesignDocCard({
               Status: {getGenerationStatusLabel(generationJob.status)}
             </Text>
             <Text className="text-xs leading-5 text-[#dffdf4]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+            {hasRenderableGenerationResult(generationJob) ? (
+              <GeneratedResultSummary
+                artifacts={generationJob.artifacts}
+                modelLabel={generationJob.modelLabel ?? null}
+                providerLabel={generationJob.providerLabel ?? null}
+                summary={generationJob.summary}
+              />
+            ) : null}
+            {getGenerationResultIssue(generationJob) ? (
+              <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
+                {getGenerationResultIssue(generationJob)}
+              </Text>
+            ) : null}
             <Pressable
               accessibilityLabel="Refresh generation status"
               accessibilityRole="button"
@@ -1136,6 +1165,47 @@ function DesignDocCard({
       </View>
 
       <Text className="text-xs leading-5 text-[#eef2ff]/55">Last updated: {formatSavedAt(designDoc.updatedAt)}</Text>
+    </View>
+  )
+}
+
+function GeneratedResultSummary({
+  artifacts,
+  modelLabel,
+  providerLabel,
+  summary,
+}: {
+  artifacts: GenerationArtifactRecord[]
+  modelLabel: string | null
+  providerLabel: string | null
+  summary: string
+}) {
+  return (
+    <View className="gap-3 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+      <View className="gap-1">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Generated result</Text>
+        <Text className="text-sm font-semibold text-[#dffdf4]">{summary}</Text>
+      </View>
+      {providerLabel || modelLabel ? (
+        <Text className="text-xs leading-5 text-[#dffdf4]/70">
+          {providerLabel ? `Provider: ${providerLabel}` : 'Provider: n/a'}
+          {modelLabel ? `  Model: ${modelLabel}` : ''}
+        </Text>
+      ) : null}
+      <View className="gap-2">
+        {artifacts.map((artifact) => (
+          <View key={artifact.artifactId} className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
+            <View className="flex-row items-start justify-between gap-3">
+              <Text className="min-w-0 flex-1 text-sm font-black text-[#eef2ff]">{artifact.name}</Text>
+              <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">{artifact.typeLabel}</Text>
+            </View>
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">{artifact.summary}</Text>
+            <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
+              {artifact.path}
+            </Text>
+          </View>
+        ))}
+      </View>
     </View>
   )
 }

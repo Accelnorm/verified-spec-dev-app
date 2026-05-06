@@ -18,6 +18,14 @@ export type MvpDesignDoc = {
   updatedAt: string
 }
 
+export type GenerationArtifactRecord = {
+  artifactId: string
+  name: string
+  typeLabel: string
+  path: string
+  summary: string
+}
+
 export type GenerationJobRecord = {
   jobId: string
   status: string
@@ -25,6 +33,10 @@ export type GenerationJobRecord = {
   statusUrl: string
   createdAt: string
   updatedAt: string
+  artifactRefs: string[]
+  artifacts: GenerationArtifactRecord[]
+  providerLabel?: string | null
+  modelLabel?: string | null
 }
 
 export type MvpShellState = {
@@ -139,6 +151,26 @@ export function getGenerationStatusLabel(status: string) {
   }
 }
 
+export function hasRenderableGenerationResult(job: GenerationJobRecord | null) {
+  return Boolean(job && job.status === 'succeeded' && job.artifacts.length > 0)
+}
+
+export function getGenerationResultIssue(job: GenerationJobRecord | null) {
+  if (!job) {
+    return null
+  }
+
+  if (job.status === 'succeeded' && job.artifacts.length === 0) {
+    return 'Backend returned a succeeded generation without generated artifacts.'
+  }
+
+  if (job.status === 'failed' && job.artifacts.length === 0) {
+    return 'The backend did not return generated artifacts for this result.'
+  }
+
+  return null
+}
+
 export function updateDesignDocField(
   state: MvpShellState,
   field: keyof Pick<MvpDesignDoc, 'title' | 'goal'>,
@@ -210,8 +242,14 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       return null
     }
 
-    if (parsed.generationJob !== null && parsed.generationJob !== undefined && !isGenerationJobRecord(parsed.generationJob)) {
-      return null
+    if (parsed.generationJob !== null && parsed.generationJob !== undefined) {
+      const normalizedGenerationJob = normalizeGenerationJobRecord(parsed.generationJob)
+
+      if (!normalizedGenerationJob) {
+        return null
+      }
+
+      parsed.generationJob = normalizedGenerationJob
     }
 
     return {
@@ -222,7 +260,7 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
         (parsed.latestPromptSeed
           ? createDesignDocFromPrompt(parsed.latestPromptSeed.prompt, parsed.latestPromptSeed.updatedAt)
           : null),
-      generationJob: parsed.generationJob ?? null,
+      generationJob: (parsed.generationJob as GenerationJobRecord | undefined) ?? null,
     }
   } catch {
     return null
@@ -348,6 +386,53 @@ function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
     typeof candidate.summary === 'string' &&
     typeof candidate.statusUrl === 'string' &&
     typeof candidate.createdAt === 'string' &&
-    typeof candidate.updatedAt === 'string'
+    typeof candidate.updatedAt === 'string' &&
+    Array.isArray(candidate.artifactRefs) &&
+    candidate.artifactRefs.every((entry) => typeof entry === 'string') &&
+    Array.isArray(candidate.artifacts) &&
+    candidate.artifacts.every(isGenerationArtifactRecord) &&
+    (candidate.providerLabel === undefined || candidate.providerLabel === null || typeof candidate.providerLabel === 'string') &&
+    (candidate.modelLabel === undefined || candidate.modelLabel === null || typeof candidate.modelLabel === 'string')
+  )
+}
+
+function normalizeGenerationJobRecord(value: unknown): GenerationJobRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const candidate = value as Partial<GenerationJobRecord> & {
+    artifactRefs?: unknown
+    artifacts?: unknown
+  }
+
+  const normalized: GenerationJobRecord = {
+    jobId: typeof candidate.jobId === 'string' ? candidate.jobId : '',
+    status: typeof candidate.status === 'string' ? candidate.status : '',
+    summary: typeof candidate.summary === 'string' ? candidate.summary : '',
+    statusUrl: typeof candidate.statusUrl === 'string' ? candidate.statusUrl : '',
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : '',
+    updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : '',
+    artifactRefs: Array.isArray(candidate.artifactRefs) ? candidate.artifactRefs.filter((entry): entry is string => typeof entry === 'string') : [],
+    artifacts: Array.isArray(candidate.artifacts) ? candidate.artifacts.filter(isGenerationArtifactRecord) : [],
+    providerLabel: typeof candidate.providerLabel === 'string' ? candidate.providerLabel : null,
+    modelLabel: typeof candidate.modelLabel === 'string' ? candidate.modelLabel : null,
+  }
+
+  return isGenerationJobRecord(normalized) ? normalized : null
+}
+
+function isGenerationArtifactRecord(value: unknown): value is GenerationArtifactRecord {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<GenerationArtifactRecord>
+  return (
+    typeof candidate.artifactId === 'string' &&
+    typeof candidate.name === 'string' &&
+    typeof candidate.typeLabel === 'string' &&
+    typeof candidate.path === 'string' &&
+    typeof candidate.summary === 'string'
   )
 }

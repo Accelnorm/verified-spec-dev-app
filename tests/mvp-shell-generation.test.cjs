@@ -91,6 +91,8 @@ test('submitGenerationJob posts the request to the backend and returns the stabl
   assert.equal(response.status, 'queued')
   assert.equal(response.summary, 'Generation job queued for AI Composer.')
   assert.equal(response.statusUrl, '/jobs/gen_626153431ac5aa23a5fafb40')
+  assert.deepEqual(response.artifactRefs, [])
+  assert.deepEqual(response.artifacts, [])
 })
 
 test('readGenerationJobStatus fetches the latest backend job state by job id', async () => {
@@ -114,6 +116,8 @@ test('readGenerationJobStatus fetches the latest backend job state by job id', a
           summary: 'AI Composer generation is running.',
           artifact_refs: [],
           artifacts: [],
+          provider: 'zai',
+          model: 'glm-5.1',
           error: null,
         }
       },
@@ -139,6 +143,65 @@ test('readGenerationJobStatus fetches the latest backend job state by job id', a
   assert.equal(response.status, 'running')
   assert.equal(response.summary, 'AI Composer generation is running.')
   assert.equal(response.updatedAt, '2026-05-06T01:11:00Z')
+  assert.equal(response.providerLabel, 'zai')
+  assert.equal(response.modelLabel, 'glm-5.1')
+})
+
+test('readGenerationJobStatus keeps artifact metadata when the backend reports a succeeded job', async () => {
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        job_id: 'gen_succeeded',
+        stage: 'generation',
+        status: 'succeeded',
+        attempt: 1,
+        retry_eligible: false,
+        timeout_seconds: 900,
+        status_url: '/jobs/gen_succeeded',
+        created_at: '2026-05-06T01:10:00Z',
+        updated_at: '2026-05-06T01:15:00Z',
+        summary: 'AI Composer generation completed.',
+        artifact_refs: ['artifact_1'],
+        artifacts: [
+          {
+            artifact_id: 'artifact_1',
+            name: 'program.so',
+            type_label: 'program_binary',
+            path: 'artifacts/program.so',
+            summary: 'Generated program binary.',
+          },
+        ],
+        provider: 'zai',
+        model: 'glm-5.1',
+        error: null,
+      }
+    },
+  })
+
+  const response = await readGenerationJobStatus({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    job: {
+      jobId: 'gen_succeeded',
+      status: 'running',
+      summary: 'AI Composer generation is running.',
+      statusUrl: '/jobs/gen_succeeded',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+      artifactRefs: [],
+      artifacts: [],
+      providerLabel: null,
+      modelLabel: null,
+    },
+    nowIso: '2026-05-06T01:15:10Z',
+  })
+
+  assert.equal(response.status, 'succeeded')
+  assert.equal(response.artifactRefs[0], 'artifact_1')
+  assert.equal(response.artifacts[0].name, 'program.so')
+  assert.equal(response.providerLabel, 'zai')
+  assert.equal(response.modelLabel, 'glm-5.1')
 })
 
 test('readGenerationJobStatus falls back to an unavailable state when the backend cannot return the job', async () => {

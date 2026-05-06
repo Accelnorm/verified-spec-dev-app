@@ -1,4 +1,4 @@
-import type { GenerationJobRequest, GenerationJobRecord } from './model'
+import type { GenerationArtifactRecord, GenerationJobRequest, GenerationJobRecord } from './model'
 
 type BackendGenerationResponse = {
   job_id: string
@@ -7,6 +7,16 @@ type BackendGenerationResponse = {
   status_url: string
   created_at: string
   updated_at: string
+  artifact_refs?: string[]
+  artifacts?: {
+    artifact_id: string
+    name: string
+    type_label: string
+    path: string
+    summary: string
+  }[]
+  provider?: string | null
+  model?: string | null
 }
 
 type BackendErrorResponse = {
@@ -51,6 +61,10 @@ export async function readGenerationJobStatus({
       statusUrl: successPayload.status_url,
       createdAt: successPayload.created_at,
       updatedAt: successPayload.updated_at,
+      artifactRefs: successPayload.artifact_refs ?? [],
+      artifacts: normalizeArtifacts(successPayload.artifacts),
+      providerLabel: successPayload.provider ?? null,
+      modelLabel: successPayload.model ?? null,
     }
   } catch {
     return buildUnavailableJob(job, nowIso)
@@ -86,6 +100,10 @@ export async function submitGenerationJob({
     statusUrl: successPayload.status_url,
     createdAt: successPayload.created_at,
     updatedAt: successPayload.updated_at,
+    artifactRefs: successPayload.artifact_refs ?? [],
+    artifacts: normalizeArtifacts(successPayload.artifacts),
+    providerLabel: successPayload.provider ?? null,
+    modelLabel: successPayload.model ?? null,
   }
 }
 
@@ -116,4 +134,14 @@ function createRefreshTimeout(timeoutMs: number) {
   return new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error('generation status refresh timed out')), timeoutMs)
   })
+}
+
+function normalizeArtifacts(artifacts: BackendGenerationResponse['artifacts']): GenerationArtifactRecord[] {
+  return (artifacts ?? []).map((artifact) => ({
+    artifactId: artifact.artifact_id,
+    name: artifact.name,
+    typeLabel: artifact.type_label,
+    path: artifact.path,
+    summary: artifact.summary,
+  }))
 }
