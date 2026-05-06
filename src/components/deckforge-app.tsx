@@ -6,6 +6,7 @@ import { useMobileWallet } from '@wallet-ui/react-native-kit'
 import {
   buildGenerationRequest,
   createInitialMvpShellState,
+  getGenerationStatusLabel,
   restoreMvpShellState,
   saveGenerationJob,
   serializeMvpShellState,
@@ -17,7 +18,7 @@ import {
   updateDesignDocField,
   updateDesignDocListField,
 } from '../features/mvp-shell/model'
-import { submitGenerationJob } from '../features/mvp-shell/generation'
+import { readGenerationJobStatus, submitGenerationJob } from '../features/mvp-shell/generation'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
 type WorkflowMode = 'Vibe' | 'Pro'
@@ -163,6 +164,7 @@ export function SpecDrivenApp() {
   const [walletError, setWalletError] = useState<string | null>(null)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [isSubmittingGeneration, setIsSubmittingGeneration] = useState(false)
+  const [isRefreshingGenerationStatus, setIsRefreshingGenerationStatus] = useState(false)
   const generationSubmitLock = useRef(false)
   const [appSettings, setAppSettings] = useState<AppSettings>({
     certoraApiKey: '',
@@ -280,6 +282,26 @@ export function SpecDrivenApp() {
     }
   }
 
+  async function handleGenerationRefresh() {
+    if (!mvpState.generationJob || isRefreshingGenerationStatus) {
+      return
+    }
+
+    setGenerationError(null)
+    setIsRefreshingGenerationStatus(true)
+
+    try {
+      const job = await readGenerationJobStatus({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        job: mvpState.generationJob,
+      })
+
+      setMvpState((currentState) => saveGenerationJob(currentState, job))
+    } finally {
+      setIsRefreshingGenerationStatus(false)
+    }
+  }
+
   function showPreviousSuggestions() {
     setSuggestionPage((currentPage) => (currentPage === 0 ? 1 : 0))
   }
@@ -325,10 +347,13 @@ export function SpecDrivenApp() {
                 selectedSuggestion={selectedSuggestion}
                 suggestionPage={suggestionPage}
                 visibleSuggestions={visibleSuggestions}
+                generationJob={mvpState.generationJob}
+                isRefreshingGenerationStatus={isRefreshingGenerationStatus}
                 onBackFromSuggestion={() => setSelectedSuggestion(null)}
                 onChangeDraft={setDraft}
                 onChangeFollowUpDraft={setFollowUpDraft}
                 onFollowUpSend={handleFollowUpSend}
+                onRefreshGenerationStatus={handleGenerationRefresh}
                 onNextSuggestions={showNextSuggestions}
                 onPreviousSuggestions={showPreviousSuggestions}
                 onSendMessage={handleSendMessage}
@@ -346,6 +371,7 @@ export function SpecDrivenApp() {
                 walletConnected={Boolean(account)}
                 generationError={generationError}
                 generationJob={mvpState.generationJob}
+                isRefreshingGenerationStatus={isRefreshingGenerationStatus}
                 isSubmittingGeneration={isSubmittingGeneration}
                 onAppSettingChange={updateAppSetting}
                 onDesignDocFieldChange={(field, value) =>
@@ -355,6 +381,7 @@ export function SpecDrivenApp() {
                   setMvpState((currentState) => updateDesignDocListField(currentState, field, value))
                 }
                 onGenerationSubmit={handleGenerationSubmit}
+                onGenerationRefresh={handleGenerationRefresh}
                 onModeChange={setMode}
                 onWalletPress={handleWalletPress}
               />
@@ -423,6 +450,8 @@ function ChatView({
   draft,
   followUpDraft,
   followUpNote,
+  generationJob,
+  isRefreshingGenerationStatus,
   latestPromptSeed,
   messages,
   selectedSuggestion,
@@ -432,6 +461,7 @@ function ChatView({
   onChangeDraft,
   onChangeFollowUpDraft,
   onFollowUpSend,
+  onRefreshGenerationStatus,
   onNextSuggestions,
   onPreviousSuggestions,
   onSendMessage,
@@ -440,6 +470,8 @@ function ChatView({
   draft: string
   followUpDraft: string
   followUpNote: string
+  generationJob: GenerationJobRecord | null
+  isRefreshingGenerationStatus: boolean
   latestPromptSeed: MvpProjectSeed | null
   messages: ChatMessage[]
   selectedSuggestion: Suggestion | null
@@ -449,6 +481,7 @@ function ChatView({
   onChangeDraft: (value: string) => void
   onChangeFollowUpDraft: (value: string) => void
   onFollowUpSend: () => void
+  onRefreshGenerationStatus: () => void
   onNextSuggestions: () => void
   onPreviousSuggestions: () => void
   onSendMessage: () => void
@@ -471,6 +504,11 @@ function ChatView({
     <View className="flex-1 justify-between gap-3">
       <View className="gap-3">
         <PromptSeedCard latestPromptSeed={latestPromptSeed} />
+        <GenerationStatusCard
+          generationJob={generationJob}
+          isRefreshing={isRefreshingGenerationStatus}
+          onRefresh={onRefreshGenerationStatus}
+        />
 
         <View className="gap-2">
           {messages.map((message) => (
@@ -623,6 +661,54 @@ function PromptSeedCard({ latestPromptSeed }: { latestPromptSeed: MvpProjectSeed
   )
 }
 
+function GenerationStatusCard({
+  generationJob,
+  isRefreshing,
+  onRefresh,
+}: {
+  generationJob: GenerationJobRecord | null
+  isRefreshing: boolean
+  onRefresh: () => void
+}) {
+  if (!generationJob) {
+    return (
+      <View className="gap-2 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-3">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation job status</Text>
+        <Text className="text-sm leading-5 text-[#eef2ff]/80">
+          No backend generation job yet. Submit the MVP Design Doc from Workspace when you are ready.
+        </Text>
+      </View>
+    )
+  }
+
+  return (
+    <View className="gap-3 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-3">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation job status</Text>
+          <Text className="text-sm font-semibold leading-5 text-[#eef2ff]">{generationJob.summary}</Text>
+        </View>
+        <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob.status)}`}>
+          <Text className="text-xs font-black text-[#dffdf4]">{getGenerationStatusLabel(generationJob.status)}</Text>
+        </View>
+      </View>
+      <Text selectable className="text-xs leading-5 text-[#eef2ff]/70">
+        Job id: {generationJob.jobId}
+      </Text>
+      <Text className="text-xs leading-5 text-[#eef2ff]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+      <Pressable
+        accessibilityLabel="Refresh generation status"
+        accessibilityRole="button"
+        disabled={isRefreshing}
+        onPress={onRefresh}
+        className={`items-center rounded-full px-4 py-2 ${isRefreshing ? 'bg-[#9db4ff]/12' : 'bg-[#9db4ff]/22 active:bg-[#9db4ff]/30'}`}
+      >
+        <Text className="text-xs font-black text-[#eef2ff]">{isRefreshing ? 'Refreshing status...' : 'Refresh status'}</Text>
+      </Pressable>
+    </View>
+  )
+}
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const fromUser = message.side === 'user'
 
@@ -721,12 +807,14 @@ function WorkspaceView({
   designDoc,
   generationError,
   generationJob,
+  isRefreshingGenerationStatus,
   isSubmittingGeneration,
   latestPromptSeed,
   mode,
   onAppSettingChange,
   onDesignDocFieldChange,
   onDesignDocListFieldChange,
+  onGenerationRefresh,
   onGenerationSubmit,
   onModeChange,
   onWalletPress,
@@ -737,6 +825,7 @@ function WorkspaceView({
   designDoc: MvpDesignDoc | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
+  isRefreshingGenerationStatus: boolean
   isSubmittingGeneration: boolean
   latestPromptSeed: MvpProjectSeed | null
   mode: WorkflowMode
@@ -746,6 +835,7 @@ function WorkspaceView({
     field: 'coreRequirements' | 'assumptions' | 'missingInformation',
     value: string
   ) => void
+  onGenerationRefresh: () => void
   onGenerationSubmit: () => void
   onModeChange: (value: WorkflowMode) => void
   onWalletPress: () => void
@@ -776,8 +866,10 @@ function WorkspaceView({
         designDoc={designDoc}
         generationError={generationError}
         generationJob={generationJob}
+        isRefreshingGenerationStatus={isRefreshingGenerationStatus}
         isSubmittingGeneration={isSubmittingGeneration}
         onFieldChange={onDesignDocFieldChange}
+        onRefresh={onGenerationRefresh}
         onGenerate={onGenerationSubmit}
         onListFieldChange={onDesignDocListFieldChange}
       />
@@ -890,20 +982,40 @@ function formatSavedAt(value: string) {
   return date.toLocaleString()
 }
 
+function getGenerationStatusBadgeClass(status: string) {
+  switch (getGenerationStatusLabel(status)) {
+    case 'Queued':
+      return 'bg-[#9db4ff]/18'
+    case 'Running':
+      return 'bg-[#ffd978]/18'
+    case 'Succeeded':
+      return 'bg-[#75e6be]/15'
+    case 'Failed':
+      return 'bg-[#ff8a5c]/18'
+    case 'Unavailable':
+    default:
+      return 'bg-[#7a8197]/25'
+  }
+}
+
 function DesignDocCard({
   designDoc,
   generationError,
   generationJob,
+  isRefreshingGenerationStatus,
   isSubmittingGeneration,
   onFieldChange,
+  onRefresh,
   onGenerate,
   onListFieldChange,
 }: {
   designDoc: MvpDesignDoc | null
   generationError: string | null
   generationJob: GenerationJobRecord | null
+  isRefreshingGenerationStatus: boolean
   isSubmittingGeneration: boolean
   onFieldChange: (field: 'title' | 'goal', value: string) => void
+  onRefresh: () => void
   onGenerate: () => void
   onListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
 }) {
@@ -972,18 +1084,35 @@ function DesignDocCard({
               Submit this MVP Design Doc to the local backend at `10.0.2.2:8000` as one AI Composer generation job.
             </Text>
           </View>
-          <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
-            <Text className="text-xs font-black text-[#dffdf4]">{generationJob ? generationJob.status : 'Ready'}</Text>
+          <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob?.status ?? 'ready')}`}>
+            <Text className="text-xs font-black text-[#dffdf4]">
+              {generationJob ? getGenerationStatusLabel(generationJob.status) : 'Ready'}
+            </Text>
           </View>
         </View>
 
         {generationJob ? (
-          <View className="gap-1 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+          <View className="gap-3 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
             <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Latest job</Text>
             <Text className="text-sm font-semibold text-[#dffdf4]">{generationJob.summary}</Text>
             <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
               Job id: {generationJob.jobId}
             </Text>
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">
+              Status: {getGenerationStatusLabel(generationJob.status)}
+            </Text>
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">Updated: {formatSavedAt(generationJob.updatedAt)}</Text>
+            <Pressable
+              accessibilityLabel="Refresh generation status"
+              accessibilityRole="button"
+              disabled={isRefreshingGenerationStatus}
+              onPress={onRefresh}
+              className={`items-center rounded-full px-4 py-2 ${isRefreshingGenerationStatus ? 'bg-[#75e6be]/15' : 'bg-[#75e6be]/25 active:bg-[#75e6be]/35'}`}
+            >
+              <Text className="text-xs font-black text-[#dffdf4]">
+                {isRefreshingGenerationStatus ? 'Refreshing status...' : 'Refresh status'}
+              </Text>
+            </Pressable>
           </View>
         ) : null}
 

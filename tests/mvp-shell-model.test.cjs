@@ -5,6 +5,7 @@ const {
   MVP_CAPTURE_ACK,
   saveGenerationJob,
   createInitialMvpShellState,
+  getGenerationStatusLabel,
   restoreMvpShellState,
   serializeMvpShellState,
   submitPrompt,
@@ -184,4 +185,15 @@ test('saveGenerationJob preserves the stable backend job id across serialization
 
   assert.equal(restoredState?.generationJob?.jobId, 'gen_626153431ac5aa23a5fafb40')
   assert.equal(restoredState?.generationJob?.status, 'queued')
+})
+
+test('getGenerationStatusLabel collapses backend-specific failures into the truthful minimal mobile states', () => {
+  assert.equal(getGenerationStatusLabel('queued'), 'Queued')
+  assert.equal(getGenerationStatusLabel('running'), 'Running')
+  assert.equal(getGenerationStatusLabel('succeeded'), 'Succeeded')
+  assert.equal(getGenerationStatusLabel('failed'), 'Failed')
+  assert.equal(getGenerationStatusLabel('timed_out'), 'Failed')
+  assert.equal(getGenerationStatusLabel('canceled'), 'Failed')
+  assert.equal(getGenerationStatusLabel('unavailable'), 'Unavailable')
+  assert.equal(getGenerationStatusLabel('anything-else'), 'Unavailable')
 })

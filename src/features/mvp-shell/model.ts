@@ -121,6 +121,24 @@ export function saveGenerationJob(state: MvpShellState, job: GenerationJobRecord
   }
 }
 
+export function getGenerationStatusLabel(status: string) {
+  switch (status) {
+    case 'queued':
+      return 'Queued'
+    case 'running':
+      return 'Running'
+    case 'succeeded':
+      return 'Succeeded'
+    case 'failed':
+    case 'timed_out':
+    case 'canceled':
+      return 'Failed'
+    case 'unavailable':
+    default:
+      return 'Unavailable'
+  }
+}
+
 export function updateDesignDocField(
   state: MvpShellState,
   field: keyof Pick<MvpDesignDoc, 'title' | 'goal'>,

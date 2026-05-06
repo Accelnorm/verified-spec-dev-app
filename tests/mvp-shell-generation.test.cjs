@@ -2,7 +2,7 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 
 const { buildGenerationRequest, createInitialMvpShellState, submitPrompt } = require('../.tmp-test-dist/features/mvp-shell/model.js')
-const { submitGenerationJob } = require('../.tmp-test-dist/features/mvp-shell/generation.js')
+const { readGenerationJobStatus, submitGenerationJob } = require('../.tmp-test-dist/features/mvp-shell/generation.js')
 
 test('buildGenerationRequest turns the current design doc into the backend request shape', () => {
   const state = submitPrompt(
@@ -91,4 +91,102 @@ test('submitGenerationJob posts the request to the backend and returns the stabl
   assert.equal(response.status, 'queued')
   assert.equal(response.summary, 'Generation job queued for AI Composer.')
   assert.equal(response.statusUrl, '/jobs/gen_626153431ac5aa23a5fafb40')
+})
+
+test('readGenerationJobStatus fetches the latest backend job state by job id', async () => {
+  const fetchCalls = []
+  global.fetch = async (url, options) => {
+    fetchCalls.push({ url, options })
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          job_id: 'gen_live_status',
+          stage: 'generation',
+          status: 'running',
+          attempt: 1,
+          retry_eligible: false,
+          timeout_seconds: 900,
+          status_url: '/jobs/gen_live_status',
+          created_at: '2026-05-06T01:10:00Z',
+          updated_at: '2026-05-06T01:11:00Z',
+          summary: 'AI Composer generation is running.',
+          artifact_refs: [],
+          artifacts: [],
+          error: null,
+        }
+      },
+    }
+  }
+
+  const response = await readGenerationJobStatus({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    job: {
+      jobId: 'gen_live_status',
+      status: 'queued',
+      summary: 'Generation job queued for AI Composer.',
+      statusUrl: '/jobs/gen_live_status',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+    },
+    nowIso: '2026-05-06T01:11:30Z',
+  })
+
+  assert.equal(fetchCalls.length, 1)
+  assert.equal(fetchCalls[0].url, 'http://127.0.0.1:8000/jobs/gen_live_status')
+  assert.equal(fetchCalls[0].options.method, 'GET')
+  assert.equal(response.status, 'running')
+  assert.equal(response.summary, 'AI Composer generation is running.')
+  assert.equal(response.updatedAt, '2026-05-06T01:11:00Z')
+})
+
+test('readGenerationJobStatus falls back to an unavailable state when the backend cannot return the job', async () => {
+  global.fetch = async () => ({
+    ok: false,
+    status: 404,
+    async json() {
+      return { detail: 'generation job not found' }
+    },
+  })
+
+  const response = await readGenerationJobStatus({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    job: {
+      jobId: 'gen_missing',
+      status: 'queued',
+      summary: 'Generation job queued for AI Composer.',
+      statusUrl: '/jobs/gen_missing',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+    },
+    nowIso: '2026-05-06T01:12:00Z',
+  })
+
+  assert.equal(response.jobId, 'gen_missing')
+  assert.equal(response.status, 'unavailable')
+  assert.equal(response.summary, 'Generation status is unavailable right now. Try again when the backend is reachable.')
+  assert.equal(response.updatedAt, '2026-05-06T01:12:00Z')
+})
+
+test('readGenerationJobStatus falls back to unavailable when the backend never responds before the refresh timeout', async () => {
+  global.fetch = async () => await new Promise(() => {})
+
+  const response = await readGenerationJobStatus({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    job: {
+      jobId: 'gen_hung',
+      status: 'running',
+      summary: 'AI Composer generation is running.',
+      statusUrl: '/jobs/gen_hung',
+      createdAt: '2026-05-06T01:10:00Z',
+      updatedAt: '2026-05-06T01:10:00Z',
+    },
+    nowIso: '2026-05-06T01:13:00Z',
+    timeoutMs: 1,
+  })
+
+  assert.equal(response.status, 'unavailable')
+  assert.equal(response.summary, 'Generation status is unavailable right now. Try again when the backend is reachable.')
+  assert.equal(response.updatedAt, '2026-05-06T01:13:00Z')
 })
