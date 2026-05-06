@@ -1,19 +1,23 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native'
 import { useMobileWallet } from '@wallet-ui/react-native-kit'
 import {
+  buildGenerationRequest,
   createInitialMvpShellState,
   restoreMvpShellState,
+  saveGenerationJob,
   serializeMvpShellState,
   submitPrompt,
   type ChatMessage,
+  type GenerationJobRecord,
   type MvpDesignDoc,
   type MvpProjectSeed,
   updateDesignDocField,
   updateDesignDocListField,
 } from '../features/mvp-shell/model'
+import { submitGenerationJob } from '../features/mvp-shell/generation'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
 type WorkflowMode = 'Vibe' | 'Pro'
@@ -132,6 +136,7 @@ const propertyGuides = [
 
 const stages = ['Clarify', 'Props', 'Gen', 'Verify', 'Deploy', 'Record']
 const MVP_SHELL_STORAGE_KEY = 'verified-spec-dev.mvp-shell'
+const LOCAL_BACKEND_BASE_URL = 'http://10.0.2.2:8000'
 
 function getWalletErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
@@ -156,6 +161,9 @@ export function SpecDrivenApp() {
   const [followUpNote, setFollowUpNote] = useState('')
   const [exploreTab, setExploreTab] = useState<ExploreTab>('projects')
   const [walletError, setWalletError] = useState<string | null>(null)
+  const [generationError, setGenerationError] = useState<string | null>(null)
+  const [isSubmittingGeneration, setIsSubmittingGeneration] = useState(false)
+  const generationSubmitLock = useRef(false)
   const [appSettings, setAppSettings] = useState<AppSettings>({
     certoraApiKey: '',
     easAuth: '',
@@ -242,6 +250,36 @@ export function SpecDrivenApp() {
     }))
   }
 
+  async function handleGenerationSubmit() {
+    if (generationSubmitLock.current || isSubmittingGeneration) {
+      return
+    }
+
+    const request = buildGenerationRequest(mvpState)
+    if (!request) {
+      setGenerationError('Create or restore an MVP Design Doc before generation can start.')
+      return
+    }
+
+    setGenerationError(null)
+    generationSubmitLock.current = true
+    setIsSubmittingGeneration(true)
+
+    try {
+      const job = await submitGenerationJob({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        request,
+      })
+
+      setMvpState((currentState) => saveGenerationJob(currentState, job))
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : 'Generation request failed. Try again.')
+    } finally {
+      generationSubmitLock.current = false
+      setIsSubmittingGeneration(false)
+    }
+  }
+
   function showPreviousSuggestions() {
     setSuggestionPage((currentPage) => (currentPage === 0 ? 1 : 0))
   }
@@ -306,6 +344,9 @@ export function SpecDrivenApp() {
                 latestPromptSeed={mvpState.latestPromptSeed}
                 mode={mode}
                 walletConnected={Boolean(account)}
+                generationError={generationError}
+                generationJob={mvpState.generationJob}
+                isSubmittingGeneration={isSubmittingGeneration}
                 onAppSettingChange={updateAppSetting}
                 onDesignDocFieldChange={(field, value) =>
                   setMvpState((currentState) => updateDesignDocField(currentState, field, value))
@@ -313,6 +354,7 @@ export function SpecDrivenApp() {
                 onDesignDocListFieldChange={(field, value) =>
                   setMvpState((currentState) => updateDesignDocListField(currentState, field, value))
                 }
+                onGenerationSubmit={handleGenerationSubmit}
                 onModeChange={setMode}
                 onWalletPress={handleWalletPress}
               />
@@ -677,11 +719,15 @@ function WorkspaceView({
   accountAddress,
   appSettings,
   designDoc,
+  generationError,
+  generationJob,
+  isSubmittingGeneration,
   latestPromptSeed,
   mode,
   onAppSettingChange,
   onDesignDocFieldChange,
   onDesignDocListFieldChange,
+  onGenerationSubmit,
   onModeChange,
   onWalletPress,
   walletConnected,
@@ -689,6 +735,9 @@ function WorkspaceView({
   accountAddress?: string
   appSettings: AppSettings
   designDoc: MvpDesignDoc | null
+  generationError: string | null
+  generationJob: GenerationJobRecord | null
+  isSubmittingGeneration: boolean
   latestPromptSeed: MvpProjectSeed | null
   mode: WorkflowMode
   onAppSettingChange: (key: keyof AppSettings, value: string) => void
@@ -697,6 +746,7 @@ function WorkspaceView({
     field: 'coreRequirements' | 'assumptions' | 'missingInformation',
     value: string
   ) => void
+  onGenerationSubmit: () => void
   onModeChange: (value: WorkflowMode) => void
   onWalletPress: () => void
   walletConnected: boolean
@@ -724,7 +774,11 @@ function WorkspaceView({
 
       <DesignDocCard
         designDoc={designDoc}
+        generationError={generationError}
+        generationJob={generationJob}
+        isSubmittingGeneration={isSubmittingGeneration}
         onFieldChange={onDesignDocFieldChange}
+        onGenerate={onGenerationSubmit}
         onListFieldChange={onDesignDocListFieldChange}
       />
 
@@ -838,11 +892,19 @@ function formatSavedAt(value: string) {
 
 function DesignDocCard({
   designDoc,
+  generationError,
+  generationJob,
+  isSubmittingGeneration,
   onFieldChange,
+  onGenerate,
   onListFieldChange,
 }: {
   designDoc: MvpDesignDoc | null
+  generationError: string | null
+  generationJob: GenerationJobRecord | null
+  isSubmittingGeneration: boolean
   onFieldChange: (field: 'title' | 'goal', value: string) => void
+  onGenerate: () => void
   onListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
 }) {
   if (!designDoc) {
@@ -901,6 +963,48 @@ function DesignDocCard({
         value={designDoc.missingInformation.join('\n')}
         onChangeText={(value) => onListFieldChange('missingInformation', value)}
       />
+
+      <View className="gap-3 rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 p-3">
+        <View className="flex-row items-start justify-between gap-3">
+          <View className="min-w-0 flex-1 gap-1">
+            <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation submission</Text>
+            <Text className="text-sm leading-5 text-[#eef2ff]/70">
+              Submit this MVP Design Doc to the local backend at `10.0.2.2:8000` as one AI Composer generation job.
+            </Text>
+          </View>
+          <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
+            <Text className="text-xs font-black text-[#dffdf4]">{generationJob ? generationJob.status : 'Ready'}</Text>
+          </View>
+        </View>
+
+        {generationJob ? (
+          <View className="gap-1 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Latest job</Text>
+            <Text className="text-sm font-semibold text-[#dffdf4]">{generationJob.summary}</Text>
+            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
+              Job id: {generationJob.jobId}
+            </Text>
+          </View>
+        ) : null}
+
+        {generationError ? (
+          <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
+            {generationError}
+          </Text>
+        ) : null}
+
+        <Pressable
+          accessibilityLabel="Generate MVP"
+          accessibilityRole="button"
+          disabled={isSubmittingGeneration}
+          onPress={onGenerate}
+          className={`items-center rounded-full px-4 py-3 ${isSubmittingGeneration ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
+        >
+          <Text className="text-sm font-black text-[#201626]">
+            {isSubmittingGeneration ? 'Submitting to backend...' : 'Generate MVP'}
+          </Text>
+        </Pressable>
+      </View>
 
       <Text className="text-xs leading-5 text-[#eef2ff]/55">Last updated: {formatSavedAt(designDoc.updatedAt)}</Text>
     </View>

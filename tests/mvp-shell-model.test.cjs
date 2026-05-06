@@ -3,6 +3,7 @@ const test = require('node:test')
 
 const {
   MVP_CAPTURE_ACK,
+  saveGenerationJob,
   createInitialMvpShellState,
   restoreMvpShellState,
   serializeMvpShellState,
@@ -157,4 +158,30 @@ test('restoreMvpShellState rejects malformed stored payloads', () => {
   )
 
   assert.equal(restoredState, null)
+})
+
+test('saveGenerationJob preserves the stable backend job id across serialization and restore', () => {
+  const stateWithPrompt = submitPrompt(
+    createInitialMvpShellState(),
+    'Build a local hackathon app',
+    (() => {
+      const ids = ['user-1', 'app-1']
+      return () => ids.shift()
+    })(),
+    '2026-05-06T01:10:00Z'
+  )
+
+  const savedState = saveGenerationJob(stateWithPrompt, {
+    jobId: 'gen_626153431ac5aa23a5fafb40',
+    status: 'queued',
+    summary: 'Generation job queued for AI Composer.',
+    statusUrl: '/jobs/gen_626153431ac5aa23a5fafb40',
+    createdAt: '2026-05-06T01:02:03Z',
+    updatedAt: '2026-05-06T01:02:03Z',
+  })
+
+  const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
+
+  assert.equal(restoredState?.generationJob?.jobId, 'gen_626153431ac5aa23a5fafb40')
+  assert.equal(restoredState?.generationJob?.status, 'queued')
 })

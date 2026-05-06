@@ -18,16 +18,34 @@ export type MvpDesignDoc = {
   updatedAt: string
 }
 
+export type GenerationJobRecord = {
+  jobId: string
+  status: string
+  summary: string
+  statusUrl: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type MvpShellState = {
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
+  generationJob: GenerationJobRecord | null
 }
 
 type StoredMvpShellState = {
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
+  generationJob: GenerationJobRecord | null
+}
+
+export type GenerationJobRequest = {
+  title: string
+  workflow_mode: string
+  project_type: string
+  design_doc: string
 }
 
 export const MVP_CAPTURE_ACK =
@@ -44,6 +62,7 @@ export function createInitialMvpShellState(): MvpShellState {
     ],
     latestPromptSeed: null,
     designDoc: null,
+    generationJob: null,
   }
 }
 
@@ -78,6 +97,27 @@ export function submitPrompt(
       updatedAt: nowIso,
     },
     designDoc: createDesignDocFromPrompt(prompt, nowIso),
+    generationJob: null,
+  }
+}
+
+export function buildGenerationRequest(state: MvpShellState): GenerationJobRequest | null {
+  if (!state.designDoc) {
+    return null
+  }
+
+  return {
+    title: state.designDoc.title,
+    workflow_mode: 'generate',
+    project_type: 'solana_mobile_app',
+    design_doc: renderDesignDocMarkdown(state.designDoc),
+  }
+}
+
+export function saveGenerationJob(state: MvpShellState, job: GenerationJobRecord): MvpShellState {
+  return {
+    ...state,
+    generationJob: job,
   }
 }
 
@@ -122,6 +162,7 @@ export function serializeMvpShellState(state: MvpShellState): string {
     messages: state.messages,
     latestPromptSeed: state.latestPromptSeed,
     designDoc: state.designDoc,
+    generationJob: state.generationJob,
   }
 
   return JSON.stringify(snapshot)
@@ -151,6 +192,10 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
       return null
     }
 
+    if (parsed.generationJob !== null && parsed.generationJob !== undefined && !isGenerationJobRecord(parsed.generationJob)) {
+      return null
+    }
+
     return {
       messages: parsed.messages,
       latestPromptSeed: parsed.latestPromptSeed ?? null,
@@ -159,10 +204,29 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
         (parsed.latestPromptSeed
           ? createDesignDocFromPrompt(parsed.latestPromptSeed.prompt, parsed.latestPromptSeed.updatedAt)
           : null),
+      generationJob: parsed.generationJob ?? null,
     }
   } catch {
     return null
   }
+}
+
+function renderDesignDocMarkdown(designDoc: MvpDesignDoc): string {
+  return [
+    `# ${designDoc.title}`,
+    '',
+    '## Goal',
+    designDoc.goal,
+    '',
+    '## Core requirements',
+    ...renderBulletList(designDoc.coreRequirements),
+    '',
+    '## Assumptions',
+    ...renderBulletList(designDoc.assumptions),
+    '',
+    '## Missing information',
+    ...renderBulletList(designDoc.missingInformation),
+  ].join('\n')
 }
 
 function createDesignDocFromPrompt(prompt: string, nowIso: string): MvpDesignDoc {
@@ -209,6 +273,10 @@ function splitLines(value: string): string[] {
     .filter(Boolean)
 }
 
+function renderBulletList(entries: string[]): string[] {
+  return entries.map((entry) => `- ${entry}`)
+}
+
 function isChatMessage(value: unknown): value is ChatMessage {
   if (!value || typeof value !== 'object') {
     return false
@@ -246,6 +314,22 @@ function isDesignDoc(value: unknown): value is MvpDesignDoc {
     candidate.assumptions.every((entry) => typeof entry === 'string') &&
     Array.isArray(candidate.missingInformation) &&
     candidate.missingInformation.every((entry) => typeof entry === 'string') &&
+    typeof candidate.updatedAt === 'string'
+  )
+}
+
+function isGenerationJobRecord(value: unknown): value is GenerationJobRecord {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<GenerationJobRecord>
+  return (
+    typeof candidate.jobId === 'string' &&
+    typeof candidate.status === 'string' &&
+    typeof candidate.summary === 'string' &&
+    typeof candidate.statusUrl === 'string' &&
+    typeof candidate.createdAt === 'string' &&
     typeof candidate.updatedAt === 'string'
   )
 }
