@@ -7,6 +7,7 @@ const {
   restoreMvpShellState,
   serializeMvpShellState,
   submitPrompt,
+  updateDesignDocField,
 } = require('../.tmp-test-dist/features/mvp-shell/model.js')
 
 test('submitPrompt stores the latest prompt seed and appends a visible confirmation', () => {
@@ -72,6 +73,63 @@ test('a later prompt replaces the seed so it survives navigation as the current 
   assert.equal(secondState.latestPromptSeed?.prompt, 'Second prompt for the actual MVP')
   assert.equal(secondState.latestPromptSeed?.updatedAt, '2026-05-06T00:01:00Z')
   assert.equal(secondState.messages.at(-2)?.text, 'Second prompt for the actual MVP')
+})
+
+test('submitPrompt provisions one editable MVP design doc from the latest prompt seed', () => {
+  const nextState = submitPrompt(
+    createInitialMvpShellState(),
+    'Build a mobile escrow app that turns chat prompts into hackathon-ready design docs with clear generation steps.',
+    (() => {
+      const ids = ['user-1', 'app-1']
+      return () => ids.shift()
+    })(),
+    '2026-05-06T00:30:00Z'
+  )
+
+  assert.equal(nextState.designDoc?.title, 'Mobile escrow app MVP')
+  assert.match(nextState.designDoc?.goal ?? '', /hackathon/i)
+  assert.equal(nextState.designDoc?.coreRequirements.length, 3)
+  assert.equal(nextState.designDoc?.assumptions.length, 2)
+  assert.equal(nextState.designDoc?.missingInformation.length, 2)
+})
+
+test('updateDesignDocField keeps user edits across serialization and restore', () => {
+  const savedState = updateDesignDocField(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a mobile escrow app that turns chat prompts into hackathon-ready design docs.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T00:30:00Z'
+    ),
+    'goal',
+    'Deliver one editable MVP design doc before generation starts.'
+  )
+
+  const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
+
+  assert.equal(restoredState?.designDoc?.goal, 'Deliver one editable MVP design doc before generation starts.')
+  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
+})
+
+test('restoreMvpShellState backfills one MVP design doc for legacy saved prompt-only state', () => {
+  const restoredState = restoreMvpShellState(
+    JSON.stringify({
+      messages: [
+        { id: 'welcome-1', side: 'app', text: 'Describe the app or program you want to build.' },
+        { id: 'user-1', side: 'user', text: 'Build a mobile escrow app for a hackathon demo.' },
+      ],
+      latestPromptSeed: {
+        prompt: 'Build a mobile escrow app for a hackathon demo.',
+        updatedAt: '2026-05-06T00:40:00Z',
+      },
+    })
+  )
+
+  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
+  assert.match(restoredState?.designDoc?.goal ?? '', /hackathon-ready/i)
 })
 
 test('serialized shell state can be restored after a relaunch without losing the latest prompt seed', () => {

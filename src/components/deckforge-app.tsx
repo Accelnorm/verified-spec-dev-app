@@ -9,7 +9,10 @@ import {
   serializeMvpShellState,
   submitPrompt,
   type ChatMessage,
+  type MvpDesignDoc,
   type MvpProjectSeed,
+  updateDesignDocField,
+  updateDesignDocListField,
 } from '../features/mvp-shell/model'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
@@ -299,10 +302,17 @@ export function SpecDrivenApp() {
               <WorkspaceView
                 accountAddress={accountAddress}
                 appSettings={appSettings}
+                designDoc={mvpState.designDoc}
                 latestPromptSeed={mvpState.latestPromptSeed}
                 mode={mode}
                 walletConnected={Boolean(account)}
                 onAppSettingChange={updateAppSetting}
+                onDesignDocFieldChange={(field, value) =>
+                  setMvpState((currentState) => updateDesignDocField(currentState, field, value))
+                }
+                onDesignDocListFieldChange={(field, value) =>
+                  setMvpState((currentState) => updateDesignDocListField(currentState, field, value))
+                }
                 onModeChange={setMode}
                 onWalletPress={handleWalletPress}
               />
@@ -666,18 +676,27 @@ function MicIcon() {
 function WorkspaceView({
   accountAddress,
   appSettings,
+  designDoc,
   latestPromptSeed,
   mode,
   onAppSettingChange,
+  onDesignDocFieldChange,
+  onDesignDocListFieldChange,
   onModeChange,
   onWalletPress,
   walletConnected,
 }: {
   accountAddress?: string
   appSettings: AppSettings
+  designDoc: MvpDesignDoc | null
   latestPromptSeed: MvpProjectSeed | null
   mode: WorkflowMode
   onAppSettingChange: (key: keyof AppSettings, value: string) => void
+  onDesignDocFieldChange: (field: 'title' | 'goal', value: string) => void
+  onDesignDocListFieldChange: (
+    field: 'coreRequirements' | 'assumptions' | 'missingInformation',
+    value: string
+  ) => void
   onModeChange: (value: WorkflowMode) => void
   onWalletPress: () => void
   walletConnected: boolean
@@ -702,6 +721,12 @@ function WorkspaceView({
             : 'Submit a project request in Chat. It will stay attached to the current project while you move between tabs.'}
         </Text>
       </View>
+
+      <DesignDocCard
+        designDoc={designDoc}
+        onFieldChange={onDesignDocFieldChange}
+        onListFieldChange={onDesignDocListFieldChange}
+      />
 
       <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
         <View className="flex-row items-start justify-between gap-3">
@@ -809,6 +834,104 @@ function formatSavedAt(value: string) {
   }
 
   return date.toLocaleString()
+}
+
+function DesignDocCard({
+  designDoc,
+  onFieldChange,
+  onListFieldChange,
+}: {
+  designDoc: MvpDesignDoc | null
+  onFieldChange: (field: 'title' | 'goal', value: string) => void
+  onListFieldChange: (field: 'coreRequirements' | 'assumptions' | 'missingInformation', value: string) => void
+}) {
+  if (!designDoc) {
+    return (
+      <View className="gap-2 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-4">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
+        <Text className="text-lg font-black text-[#eef2ff]">Not generated yet</Text>
+        <Text className="text-sm leading-6 text-[#eef2ff]/75">
+          Submit a prompt in Chat to provision one editable MVP Design Doc for review before generation.
+        </Text>
+      </View>
+    )
+  }
+
+  return (
+    <View className="gap-4 rounded-lg border border-[#9db4ff]/25 bg-[#1f2338] p-4">
+      <View className="flex-row items-start justify-between gap-3">
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
+          <Text className="text-2xl font-black leading-7 text-[#eef2ff]">Editable review surface</Text>
+          <Text className="text-sm leading-6 text-[#eef2ff]/70">
+            Review this single MVP artifact before backend generation is available.
+          </Text>
+        </View>
+        <View className="rounded-full bg-[#9db4ff]/15 px-3 py-2">
+          <Text className="text-xs font-black text-[#eef2ff]">1 doc</Text>
+        </View>
+      </View>
+
+      <EditableDocField
+        label="Title"
+        value={designDoc.title}
+        onChangeText={(value) => onFieldChange('title', value)}
+      />
+      <EditableDocField
+        label="Goal"
+        multiline
+        value={designDoc.goal}
+        onChangeText={(value) => onFieldChange('goal', value)}
+      />
+      <EditableDocField
+        label="Core requirements"
+        multiline
+        value={designDoc.coreRequirements.join('\n')}
+        onChangeText={(value) => onListFieldChange('coreRequirements', value)}
+      />
+      <EditableDocField
+        label="Assumptions"
+        multiline
+        value={designDoc.assumptions.join('\n')}
+        onChangeText={(value) => onListFieldChange('assumptions', value)}
+      />
+      <EditableDocField
+        label="Missing information"
+        multiline
+        value={designDoc.missingInformation.join('\n')}
+        onChangeText={(value) => onListFieldChange('missingInformation', value)}
+      />
+
+      <Text className="text-xs leading-5 text-[#eef2ff]/55">Last updated: {formatSavedAt(designDoc.updatedAt)}</Text>
+    </View>
+  )
+}
+
+function EditableDocField({
+  label,
+  multiline = false,
+  onChangeText,
+  value,
+}: {
+  label: string
+  multiline?: boolean
+  onChangeText: (value: string) => void
+  value: string
+}) {
+  return (
+    <View className="gap-2">
+      <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">{label}</Text>
+      <TextInput
+        multiline={multiline}
+        onChangeText={onChangeText}
+        placeholder={label}
+        placeholderTextColor="rgba(238,242,255,0.35)"
+        style={{ minHeight: multiline ? 88 : 46, textAlignVertical: multiline ? 'top' : 'center' }}
+        className="rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/8 px-4 py-3 text-sm font-semibold leading-6 text-[#eef2ff]"
+        value={value}
+      />
+    </View>
+  )
 }
 
 function MiniDecisionCard({ body, label, title }: { body: string; label: string; title: string }) {
