@@ -1,16 +1,20 @@
-import { useState } from 'react'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { useEffect, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native'
 import { useMobileWallet } from '@wallet-ui/react-native-kit'
+import {
+  createInitialMvpShellState,
+  restoreMvpShellState,
+  serializeMvpShellState,
+  submitPrompt,
+  type ChatMessage,
+  type MvpProjectSeed,
+} from '../features/mvp-shell/model'
 
 type PrimaryTab = 'explore' | 'chat' | 'workspace'
 type WorkflowMode = 'Vibe' | 'Pro'
 type ExploreTab = 'projects' | 'properties'
-type Message = {
-  id: string
-  side: 'user' | 'app'
-  text: string
-}
 type AppSettings = {
   certoraApiKey: string
   easAuth: string
@@ -60,19 +64,6 @@ const suggestions: Suggestion[] = [
     detail:
       'This adds liveness to the escrow flow and creates a clean property target for deadline and dispute invariants.',
     impact: 'Good property target',
-  },
-]
-
-const initialMessages: Message[] = [
-  {
-    id: 'm1',
-    side: 'user',
-    text: 'Build milestone escrow with dispute windows and release approvals.',
-  },
-  {
-    id: 'm2',
-    side: 'app',
-    text: 'Generation is blocked on one rule: who can pause after funding. Pick a suggested next action or ask a new question.',
   },
 ]
 
@@ -137,6 +128,7 @@ const propertyGuides = [
 ]
 
 const stages = ['Clarify', 'Props', 'Gen', 'Verify', 'Deploy', 'Record']
+const MVP_SHELL_STORAGE_KEY = 'verified-spec-dev.mvp-shell'
 
 function getWalletErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
@@ -154,7 +146,8 @@ export function SpecDrivenApp() {
   const [mode, setMode] = useState<WorkflowMode>('Pro')
   const [suggestionPage, setSuggestionPage] = useState(0)
   const [selectedSuggestion, setSelectedSuggestion] = useState<Suggestion | null>(null)
-  const [messages, setMessages] = useState<Message[]>(initialMessages)
+  const [mvpState, setMvpState] = useState(createInitialMvpShellState)
+  const [hasLoadedMvpState, setHasLoadedMvpState] = useState(false)
   const [draft, setDraft] = useState('')
   const [followUpDraft, setFollowUpDraft] = useState('')
   const [followUpNote, setFollowUpNote] = useState('')
@@ -169,6 +162,39 @@ export function SpecDrivenApp() {
   const accountAddress = account?.address.toString()
   const visibleSuggestions = suggestions.slice(suggestionPage * 2, suggestionPage * 2 + 2)
   const screenKey = `${activeTab}-${selectedSuggestion ? selectedSuggestion.id : 'main'}-${exploreTab}`
+
+  useEffect(() => {
+    let isCancelled = false
+
+    async function loadPersistedState() {
+      try {
+        const storedValue = await AsyncStorage.getItem(MVP_SHELL_STORAGE_KEY)
+        const restoredState = restoreMvpShellState(storedValue)
+
+        if (!isCancelled && restoredState) {
+          setMvpState(restoredState)
+        }
+      } finally {
+        if (!isCancelled) {
+          setHasLoadedMvpState(true)
+        }
+      }
+    }
+
+    void loadPersistedState()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hasLoadedMvpState) {
+      return
+    }
+
+    void AsyncStorage.setItem(MVP_SHELL_STORAGE_KEY, serializeMvpShellState(mvpState))
+  }, [hasLoadedMvpState, mvpState])
 
   async function handleWalletPress() {
     setWalletError(null)
@@ -185,22 +211,9 @@ export function SpecDrivenApp() {
   }
 
   function handleSendMessage() {
-    const cleanDraft = draft.trim()
-
-    if (!cleanDraft) {
-      return
-    }
-
-    const now = Date.now()
-    setMessages((currentMessages) => [
-      ...currentMessages,
-      { id: `user-${now}`, side: 'user', text: cleanDraft },
-      {
-        id: `app-${now}`,
-        side: 'app',
-        text: 'Captured locally. Backend chat and AI Composer job execution are not connected in this template yet.',
-      },
-    ])
+    setMvpState((currentState) =>
+      submitPrompt(currentState, draft, () => `message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, new Date().toISOString())
+    )
     setDraft('')
   }
 
@@ -266,7 +279,8 @@ export function SpecDrivenApp() {
                 draft={draft}
                 followUpDraft={followUpDraft}
                 followUpNote={followUpNote}
-                messages={messages}
+                latestPromptSeed={mvpState.latestPromptSeed}
+                messages={mvpState.messages}
                 selectedSuggestion={selectedSuggestion}
                 suggestionPage={suggestionPage}
                 visibleSuggestions={visibleSuggestions}
@@ -285,6 +299,7 @@ export function SpecDrivenApp() {
               <WorkspaceView
                 accountAddress={accountAddress}
                 appSettings={appSettings}
+                latestPromptSeed={mvpState.latestPromptSeed}
                 mode={mode}
                 walletConnected={Boolean(account)}
                 onAppSettingChange={updateAppSetting}
@@ -356,6 +371,7 @@ function ChatView({
   draft,
   followUpDraft,
   followUpNote,
+  latestPromptSeed,
   messages,
   selectedSuggestion,
   suggestionPage,
@@ -372,7 +388,8 @@ function ChatView({
   draft: string
   followUpDraft: string
   followUpNote: string
-  messages: Message[]
+  latestPromptSeed: MvpProjectSeed | null
+  messages: ChatMessage[]
   selectedSuggestion: Suggestion | null
   suggestionPage: number
   visibleSuggestions: Suggestion[]
@@ -401,6 +418,8 @@ function ChatView({
   return (
     <View className="flex-1 justify-between gap-3">
       <View className="gap-3">
+        <PromptSeedCard latestPromptSeed={latestPromptSeed} />
+
         <View className="gap-2">
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
@@ -439,7 +458,7 @@ function ChatView({
 
       <Composer
         draft={draft}
-        placeholder="Ask about dispute lock..."
+        placeholder="Describe the app or program you want..."
         onChangeDraft={onChangeDraft}
         onSend={onSendMessage}
       />
@@ -528,7 +547,31 @@ function ModeSwitch({ mode, onModeChange }: { mode: WorkflowMode; onModeChange: 
   )
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function PromptSeedCard({ latestPromptSeed }: { latestPromptSeed: MvpProjectSeed | null }) {
+  if (!latestPromptSeed) {
+    return (
+      <View className="gap-2 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">MVP prompt seed</Text>
+        <Text className="text-sm leading-5 text-[#dffdf4]/80">
+          Your first accepted prompt will be kept here and reused as the seed for the MVP Design Doc.
+        </Text>
+      </View>
+    )
+  }
+
+  return (
+    <View className="gap-2 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
+      <View className="flex-row items-start justify-between gap-3">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">MVP prompt seed</Text>
+        <Text className="text-[10px] font-bold uppercase tracking-wider text-[#dffdf4]/60">Saved locally</Text>
+      </View>
+      <Text className="text-sm font-semibold leading-5 text-[#dffdf4]">{latestPromptSeed.prompt}</Text>
+      <Text className="text-xs leading-4 text-[#dffdf4]/65">Latest capture: {formatSavedAt(latestPromptSeed.updatedAt)}</Text>
+    </View>
+  )
+}
+
+function MessageBubble({ message }: { message: ChatMessage }) {
   const fromUser = message.side === 'user'
 
   return (
@@ -577,11 +620,15 @@ function Composer({
       </Pressable>
       <TextInput
         className="min-h-9 min-w-0 flex-1 px-1 py-2 text-sm font-semibold leading-5 text-[#fff4cf]"
+        blurOnSubmit={false}
         multiline
         onChangeText={onChangeDraft}
+        onSubmitEditing={onSend}
         placeholder={placeholder}
         placeholderTextColor="rgba(255,244,207,0.45)"
+        returnKeyType="send"
         style={{ maxHeight: 112, textAlignVertical: 'top' }}
+        submitBehavior="submit"
         value={draft}
       />
       <Pressable
@@ -619,6 +666,7 @@ function MicIcon() {
 function WorkspaceView({
   accountAddress,
   appSettings,
+  latestPromptSeed,
   mode,
   onAppSettingChange,
   onModeChange,
@@ -627,6 +675,7 @@ function WorkspaceView({
 }: {
   accountAddress?: string
   appSettings: AppSettings
+  latestPromptSeed: MvpProjectSeed | null
   mode: WorkflowMode
   onAppSettingChange: (key: keyof AppSettings, value: string) => void
   onModeChange: (value: WorkflowMode) => void
@@ -635,6 +684,25 @@ function WorkspaceView({
 }) {
   return (
     <View className="gap-4">
+      <View className="gap-3 rounded-lg border border-[#75e6be]/20 bg-[#75e6be]/10 p-4">
+        <View className="flex-row items-start justify-between gap-3">
+          <View className="min-w-0 flex-1">
+            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Current MVP seed</Text>
+            <Text className="mt-1 text-xl font-black leading-6 text-[#dffdf4]">
+              {latestPromptSeed ? 'Ready for Design Doc review' : 'Waiting for your first prompt'}
+            </Text>
+          </View>
+          <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
+            <Text className="text-xs font-black text-[#dffdf4]">{latestPromptSeed ? 'Captured' : 'Empty'}</Text>
+          </View>
+        </View>
+        <Text className="text-sm leading-6 text-[#dffdf4]/80">
+          {latestPromptSeed
+            ? latestPromptSeed.prompt
+            : 'Submit a project request in Chat. It will stay attached to the current project while you move between tabs.'}
+        </Text>
+      </View>
+
       <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
         <View className="flex-row items-start justify-between gap-3">
           <View className="min-w-0 flex-1 gap-1">
@@ -731,6 +799,16 @@ function WorkspaceView({
       </View>
     </View>
   )
+}
+
+function formatSavedAt(value: string) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString()
 }
 
 function MiniDecisionCard({ body, label, title }: { body: string; label: string; title: string }) {
