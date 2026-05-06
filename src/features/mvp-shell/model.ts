@@ -72,6 +72,8 @@ export type GenerationArtifactRecord = {
   summary: string
 }
 
+export type DeploymentArtifactKind = 'program_binary' | 'cargo_project_source'
+
 export type GenerationJobRecord = {
   jobId: string
   status: string
@@ -103,6 +105,20 @@ export type DeploymentTransactionRequest = {
   simulationSummary: string | null
 }
 
+export type DeploymentFeeEstimate = {
+  programSizeBytes: number
+  programSha256: string | null
+  programDataSpaceBytes: number | null
+  programAccountSpaceBytes: number | null
+  rentLamports: number
+  estimatedNetworkFeeLamports: number
+  serviceFeeLamports: number
+  totalLamports: number
+  calculationBasis: string | null
+  estimateExpiresAt: string
+  paymentRecipient: string
+}
+
 export type DeploymentJobRecord = {
   jobId: string
   status: string
@@ -119,7 +135,14 @@ export type DeploymentJobRecord = {
   transactionSignatures: string[]
   deploymentRefs: string[]
   verificationStatusAtDeploy: string | null
+  upgradeAuthorityVerified: boolean
+  squadsAuthorityValidationStatus: string
+  deploymentEstimate: DeploymentFeeEstimate | null
+  paymentRequest: DeploymentTransactionRequest | null
+  paymentSignature: string | null
+  refundSignature: string | null
   signatureRequest: DeploymentTransactionRequest | null
+  errorMessage: string | null
 }
 
 export type MvpShellState = {
@@ -165,7 +188,7 @@ export type GenerationJobRequest = {
 }
 
 export const DEVNET_DEPLOYMENT_DEMO_WARNING =
-  'Demo deploy: your wallet controls this program. Use multisig/governance for production.'
+  'Devnet deploy: your wallet signs one prepayment. Backend deploys, then transfers upgrade authority to Squads before success.'
 
 export const MVP_CAPTURE_ACK = 'Project request captured. Review the Design Doc in Workspace before generation.'
 
@@ -432,27 +455,47 @@ export function getDeployableGenerationArtifact(job: GenerationJobRecord | null)
   }
 
   return (
-    job?.artifacts.find((artifact) => {
-      const searchable = `${artifact.name} ${artifact.typeLabel} ${artifact.path} ${artifact.summary}`.toLowerCase()
-      return (
-        searchable.includes('deployable') ||
-        searchable.includes('anchor') ||
-        searchable.includes('program_binary') ||
-        searchable.includes('program.so') ||
-        searchable.includes('bundle')
-      )
-    }) ??
-    job?.artifacts[0] ??
+    job?.artifacts.find((artifact) => getGenerationArtifactDeploymentKind(artifact) === 'program_binary') ??
+    job?.artifacts.find((artifact) => getGenerationArtifactDeploymentKind(artifact) === 'cargo_project_source') ??
     null
   )
 }
 
-export function getDevnetDeploymentBlocker(state: MvpShellState, walletConnected: boolean): string | null {
+export function getGenerationArtifactDeploymentKind(
+  artifact: GenerationArtifactRecord | null,
+): DeploymentArtifactKind | null {
+  if (!artifact) {
+    return null
+  }
+
+  const name = artifact.name.toLowerCase()
+  const path = artifact.path.toLowerCase()
+  const typeLabel = artifact.typeLabel.toLowerCase()
+
+  if (typeLabel === 'program_binary' || name.endsWith('.so') || path.endsWith('.so')) {
+    return 'program_binary'
+  }
+
+  if (name === 'cargo.toml' || path.endsWith('/cargo.toml')) {
+    return 'cargo_project_source'
+  }
+
+  return null
+}
+
+export function getDevnetDeploymentBlocker(
+  state: MvpShellState,
+  walletConnected: boolean,
+  squadsUpgradeAuthorityAddress = '',
+): string | null {
   if (!getDeployableGenerationArtifact(state.generationJob)) {
-    return 'Generate a deployable Solana program artifact before devnet deployment.'
+    return 'Generate a Solana program binary or buildable Cargo project before devnet deployment.'
   }
   if (!walletConnected) {
     return 'Connect a wallet before devnet deployment.'
+  }
+  if (!squadsUpgradeAuthorityAddress.trim()) {
+    return 'Paste the Squads upgrade authority before devnet deployment.'
   }
   return null
 }
@@ -463,9 +506,21 @@ export function getDeploymentStatusLabel(status: string) {
       return 'Queued'
     case 'running':
       return 'Running'
+    case 'payment_required':
+      return 'Payment required'
+    case 'payment_confirming':
+      return 'Confirming payment'
+    case 'deploying':
+      return 'Deploying'
+    case 'authority_verification_pending':
+      return 'Verifying authority'
     case 'blocked':
     case 'signature_needed':
       return 'Signature needed'
+    case 'refund_pending':
+      return 'Refund pending'
+    case 'refunded':
+      return 'Refunded'
     case 'succeeded':
       return 'Succeeded'
     case 'failed':
@@ -479,7 +534,15 @@ export function getDeploymentStatusLabel(status: string) {
 }
 
 export function isActiveDeploymentJob(status: string) {
-  return status === 'queued' || status === 'running' || status === 'retrying'
+  return (
+    status === 'queued' ||
+    status === 'running' ||
+    status === 'retrying' ||
+    status === 'payment_confirming' ||
+    status === 'deploying' ||
+    status === 'authority_verification_pending' ||
+    status === 'refund_pending'
+  )
 }
 
 export function getGenerationResultIssue(job: GenerationJobRecord | null) {
@@ -642,7 +705,8 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
         typeof parsed.verificationPropertiesApprovedAt === 'string' ? parsed.verificationPropertiesApprovedAt : null,
       cvlrSpec: parsed.cvlrSpec ?? null,
       cvlrSpecApprovedAt: typeof parsed.cvlrSpecApprovedAt === 'string' ? parsed.cvlrSpecApprovedAt : null,
-      secProReviewRequestedAt: typeof parsed.secProReviewRequestedAt === 'string' ? parsed.secProReviewRequestedAt : null,
+      secProReviewRequestedAt:
+        typeof parsed.secProReviewRequestedAt === 'string' ? parsed.secProReviewRequestedAt : null,
       publishedAt: typeof parsed.publishedAt === 'string' ? parsed.publishedAt : null,
       suggestions: parsed.suggestions ?? [],
       generationJob: (parsed.generationJob as GenerationJobRecord | undefined) ?? null,
@@ -947,6 +1011,35 @@ function isDeploymentTransactionRequest(value: unknown): value is DeploymentTran
   )
 }
 
+function isDeploymentFeeEstimate(value: unknown): value is DeploymentFeeEstimate {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Partial<DeploymentFeeEstimate>
+  return (
+    typeof candidate.programSizeBytes === 'number' &&
+    (candidate.programSha256 === undefined ||
+      candidate.programSha256 === null ||
+      typeof candidate.programSha256 === 'string') &&
+    (candidate.programDataSpaceBytes === undefined ||
+      candidate.programDataSpaceBytes === null ||
+      typeof candidate.programDataSpaceBytes === 'number') &&
+    (candidate.programAccountSpaceBytes === undefined ||
+      candidate.programAccountSpaceBytes === null ||
+      typeof candidate.programAccountSpaceBytes === 'number') &&
+    typeof candidate.rentLamports === 'number' &&
+    typeof candidate.estimatedNetworkFeeLamports === 'number' &&
+    typeof candidate.serviceFeeLamports === 'number' &&
+    typeof candidate.totalLamports === 'number' &&
+    (candidate.calculationBasis === undefined ||
+      candidate.calculationBasis === null ||
+      typeof candidate.calculationBasis === 'string') &&
+    typeof candidate.estimateExpiresAt === 'string' &&
+    typeof candidate.paymentRecipient === 'string'
+  )
+}
+
 function isDeploymentJobRecord(value: unknown): value is DeploymentJobRecord {
   if (!value || typeof value !== 'object') {
     return false
@@ -971,7 +1064,14 @@ function isDeploymentJobRecord(value: unknown): value is DeploymentJobRecord {
     Array.isArray(candidate.deploymentRefs) &&
     candidate.deploymentRefs.every((entry) => typeof entry === 'string') &&
     (candidate.verificationStatusAtDeploy === null || typeof candidate.verificationStatusAtDeploy === 'string') &&
-    (candidate.signatureRequest === null || isDeploymentTransactionRequest(candidate.signatureRequest))
+    typeof candidate.upgradeAuthorityVerified === 'boolean' &&
+    typeof candidate.squadsAuthorityValidationStatus === 'string' &&
+    (candidate.deploymentEstimate === null || isDeploymentFeeEstimate(candidate.deploymentEstimate)) &&
+    (candidate.paymentRequest === null || isDeploymentTransactionRequest(candidate.paymentRequest)) &&
+    (candidate.paymentSignature === null || typeof candidate.paymentSignature === 'string') &&
+    (candidate.refundSignature === null || typeof candidate.refundSignature === 'string') &&
+    (candidate.signatureRequest === null || isDeploymentTransactionRequest(candidate.signatureRequest)) &&
+    (candidate.errorMessage === null || typeof candidate.errorMessage === 'string')
   )
 }
 
@@ -983,9 +1083,17 @@ function normalizeDeploymentJobRecord(value: unknown): DeploymentJobRecord | nul
   const candidate = value as Partial<DeploymentJobRecord> & {
     transactionSignatures?: unknown
     deploymentRefs?: unknown
+    deploymentEstimate?: unknown
+    paymentRequest?: unknown
     signatureRequest?: unknown
   }
 
+  const normalizedDeploymentEstimate =
+    candidate.deploymentEstimate && isDeploymentFeeEstimate(candidate.deploymentEstimate)
+      ? candidate.deploymentEstimate
+      : null
+  const normalizedPaymentRequest =
+    candidate.paymentRequest && isDeploymentTransactionRequest(candidate.paymentRequest) ? candidate.paymentRequest : null
   const normalizedSignatureRequest =
     candidate.signatureRequest && isDeploymentTransactionRequest(candidate.signatureRequest)
       ? candidate.signatureRequest
@@ -1012,7 +1120,18 @@ function normalizeDeploymentJobRecord(value: unknown): DeploymentJobRecord | nul
       : [],
     verificationStatusAtDeploy:
       typeof candidate.verificationStatusAtDeploy === 'string' ? candidate.verificationStatusAtDeploy : null,
+    upgradeAuthorityVerified:
+      typeof candidate.upgradeAuthorityVerified === 'boolean' ? candidate.upgradeAuthorityVerified : false,
+    squadsAuthorityValidationStatus:
+      typeof candidate.squadsAuthorityValidationStatus === 'string'
+        ? candidate.squadsAuthorityValidationStatus
+        : 'not_applicable',
+    deploymentEstimate: normalizedDeploymentEstimate,
+    paymentRequest: normalizedPaymentRequest,
+    paymentSignature: typeof candidate.paymentSignature === 'string' ? candidate.paymentSignature : null,
+    refundSignature: typeof candidate.refundSignature === 'string' ? candidate.refundSignature : null,
     signatureRequest: normalizedSignatureRequest,
+    errorMessage: typeof candidate.errorMessage === 'string' ? candidate.errorMessage : null,
   }
 
   return isDeploymentJobRecord(normalized) ? normalized : null

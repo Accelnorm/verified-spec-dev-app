@@ -10,6 +10,7 @@ const {
   getDeployableGenerationArtifact,
   getDeploymentStatusLabel,
   getDevnetDeploymentBlocker,
+  getGenerationArtifactDeploymentKind,
   getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
@@ -158,7 +159,10 @@ test('generation readiness is based on backend-restored properties and approval 
   }
 
   assert.equal(propertiesApprovedState.verificationPropertiesApprovedAt, '2026-05-06T01:07:00Z')
-  assert.equal(getGenerationBlocker(propertiesApprovedState), 'Generate CVLR specs from the approved properties before generation.')
+  assert.equal(
+    getGenerationBlocker(propertiesApprovedState),
+    'Generate CVLR specs from the approved properties before generation.',
+  )
 
   const withCvlrSpec = saveCvlrSpec(propertiesApprovedState, {
     checksRs: '#[rule] pub fn rule_cap() {}',
@@ -551,7 +555,7 @@ test('getGenerationResultIssue prefers the backend failure message when generati
 test('devnet deployment is gated on a deployable artifact and connected wallet', () => {
   const emptyState = createInitialMvpShellState()
 
-  assert.match(getDevnetDeploymentBlocker(emptyState, true), /Generate a deployable/)
+  assert.match(getDevnetDeploymentBlocker(emptyState, true), /Generate a Solana program binary/)
 
   const generatedState = saveGenerationJob(emptyState, {
     jobId: 'gen_succeeded',
@@ -575,15 +579,81 @@ test('devnet deployment is gated on a deployable artifact and connected wallet',
   })
 
   assert.equal(getDeployableGenerationArtifact(generatedState.generationJob)?.artifactId, 'artifact_1')
+  assert.equal(
+    getGenerationArtifactDeploymentKind(getDeployableGenerationArtifact(generatedState.generationJob)),
+    'program_binary',
+  )
   assert.equal(getDevnetDeploymentBlocker(generatedState, false), 'Connect a wallet before devnet deployment.')
-  assert.equal(getDevnetDeploymentBlocker(generatedState, true), null)
+  assert.equal(
+    getDevnetDeploymentBlocker(generatedState, true),
+    'Paste the Squads upgrade authority before devnet deployment.',
+  )
+  assert.equal(getDevnetDeploymentBlocker(generatedState, true, 'So11111111111111111111111111111111111111112'), null)
+
+  const buildSourceState = saveGenerationJob(emptyState, {
+    jobId: 'gen_source_succeeded',
+    status: 'succeeded',
+    summary: 'AI Composer generation completed.',
+    statusUrl: '/jobs/gen_source_succeeded',
+    createdAt: '2026-05-06T01:10:00Z',
+    updatedAt: '2026-05-06T01:10:00Z',
+    artifactRefs: ['artifact_1', 'artifact_2'],
+    artifacts: [
+      {
+        artifactId: 'artifact_1',
+        name: 'Cargo.toml',
+        typeLabel: 'generated_file',
+        path: 'materialized/thread/Cargo.toml',
+        summary: 'Generated AI Composer artifact.',
+      },
+      {
+        artifactId: 'artifact_2',
+        name: 'lib.rs',
+        typeLabel: 'rust_source',
+        path: 'materialized/thread/src/lib.rs',
+        summary: 'Generated Rust source file.',
+      },
+    ],
+    providerLabel: null,
+    modelLabel: null,
+  })
+
+  assert.equal(getDeployableGenerationArtifact(buildSourceState.generationJob)?.artifactId, 'artifact_1')
+  assert.equal(
+    getGenerationArtifactDeploymentKind(getDeployableGenerationArtifact(buildSourceState.generationJob)),
+    'cargo_project_source',
+  )
+
+  const sourceOnlyState = saveGenerationJob(emptyState, {
+    jobId: 'gen_source_only_succeeded',
+    status: 'succeeded',
+    summary: 'AI Composer generation completed.',
+    statusUrl: '/jobs/gen_source_only_succeeded',
+    createdAt: '2026-05-06T01:10:00Z',
+    updatedAt: '2026-05-06T01:10:00Z',
+    artifactRefs: ['artifact_1'],
+    artifacts: [
+      {
+        artifactId: 'artifact_1',
+        name: 'lib.rs',
+        typeLabel: 'rust_source',
+        path: 'materialized/thread/src/lib.rs',
+        summary: 'Generated Rust source file.',
+      },
+    ],
+    providerLabel: null,
+    modelLabel: null,
+  })
+
+  assert.equal(getDeployableGenerationArtifact(sourceOnlyState.generationJob), null)
+  assert.match(getDevnetDeploymentBlocker(sourceOnlyState, true), /Generate a Solana program binary/)
 })
 
-test('deployment jobs survive serialization with signature request metadata', () => {
+test('deployment jobs survive serialization with payment request metadata', () => {
   const savedState = saveDeploymentJob(createInitialMvpShellState(), {
     jobId: 'dep_123',
-    status: 'blocked',
-    summary: 'Wallet signature required.',
+    status: 'payment_required',
+    summary: 'Wallet prepayment required.',
     statusUrl: '/jobs/dep_123',
     createdAt: '2026-05-06T02:00:00Z',
     updatedAt: '2026-05-06T02:00:00Z',
@@ -596,22 +666,37 @@ test('deployment jobs survive serialization with signature request metadata', ()
     transactionSignatures: [],
     deploymentRefs: [],
     verificationStatusAtDeploy: 'succeeded',
-    signatureRequest: {
-      requestId: 'sigreq_1',
+    upgradeAuthorityVerified: false,
+    squadsAuthorityValidationStatus: 'not_applicable',
+    deploymentEstimate: {
+      programSizeBytes: 18504,
+      rentLamports: 128000000,
+      estimatedNetworkFeeLamports: 25000,
+      serviceFeeLamports: 1280250,
+      totalLamports: 129305250,
+      estimateExpiresAt: '2026-05-06T02:15:00Z',
+      paymentRecipient: 'backend_fee_recipient',
+    },
+    paymentRequest: {
+      requestId: 'payreq_1',
       transactionBase64: 'AQID',
       minContextSlot: '42',
-      summary: 'Deploy artifact_1 to devnet.',
-      simulationSummary: 'Simulation passed.',
+      summary: 'Prepay artifact_1 deployment.',
+      simulationSummary: 'Total prepay: 129305250 lamports.',
     },
+    paymentSignature: null,
+    refundSignature: null,
+    signatureRequest: null,
   })
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
 
   assert.equal(restoredState?.deploymentJob?.jobId, 'dep_123')
-  assert.equal(restoredState?.deploymentJob?.signatureRequest?.requestId, 'sigreq_1')
-  assert.equal(getDeploymentStatusLabel('blocked'), 'Signature needed')
+  assert.equal(restoredState?.deploymentJob?.paymentRequest?.requestId, 'payreq_1')
+  assert.equal(restoredState?.deploymentJob?.deploymentEstimate?.totalLamports, 129305250)
+  assert.equal(getDeploymentStatusLabel('payment_required'), 'Payment required')
   assert.equal(
     DEVNET_DEPLOYMENT_DEMO_WARNING,
-    'Demo deploy: your wallet controls this program. Use multisig/governance for production.',
+    'Devnet deploy: your wallet signs one prepayment. Backend deploys, then transfers upgrade authority to Squads before success.',
   )
 })

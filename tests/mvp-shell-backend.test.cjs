@@ -7,6 +7,7 @@ const {
   applyVibeDefaultsToProject,
   capturePromptToProject,
   listProjectSummaries,
+  saveDesignDocToProject,
   sendProjectChatMessage,
   updateProjectWorkflowMode,
 } = require('../.tmp-test-dist/features/mvp-shell/backend.js')
@@ -144,6 +145,59 @@ test('capturePromptToProject sends selected workflow mode', async () => {
     prompt: 'Build a marketplace MVP.',
     workflow_mode: 'vibe_coding',
   })
+})
+
+test('saveDesignDocToProject writes the document then reads the authoritative project snapshot', async () => {
+  const fetchCalls = []
+  global.fetch = async (url, options) => {
+    fetchCalls.push({ url, options })
+    if (options.method === 'PUT') {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            project_id: 'proj_chat',
+            title: 'Marketplace MVP',
+            goal: 'Clarify the marketplace MVP before generation.',
+            core_requirements: ['Persist project chat messages.'],
+            assumptions: ['Backend owns provider credentials.'],
+            missing_information: ['Which acceptance checks prove the MVP is ready?'],
+            updated_at: '2026-05-06T01:10:00Z',
+          }
+        },
+      }
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return projectSnapshotPayload()
+      },
+    }
+  }
+
+  const snapshot = await saveDesignDocToProject({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    projectId: 'proj_chat',
+    designDoc: {
+      title: 'Marketplace MVP',
+      goal: 'Clarify the marketplace MVP before generation.',
+      coreRequirements: ['Persist project chat messages.'],
+      assumptions: ['Backend owns provider credentials.'],
+      missingInformation: ['Which acceptance checks prove the MVP is ready?'],
+      updatedAt: '2026-05-06T01:10:00Z',
+    },
+  })
+
+  assert.equal(fetchCalls.length, 2)
+  assert.equal(fetchCalls[0].url, 'http://127.0.0.1:8000/projects/proj_chat/design-doc')
+  assert.equal(fetchCalls[0].options.method, 'PUT')
+  assert.equal(fetchCalls[1].url, 'http://127.0.0.1:8000/projects/proj_chat')
+  assert.equal(fetchCalls[1].options.method, 'GET')
+  assert.equal(snapshot.projectId, 'proj_chat')
+  assert.equal(snapshot.state.designDoc.title, 'Marketplace MVP')
 })
 
 test('listProjectSummaries returns route-ready project titles and ids', async () => {

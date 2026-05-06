@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  DeploymentFeeEstimate,
   DeploymentJobRecord,
   DeploymentTransactionRequest,
   GenerationArtifactRecord,
@@ -83,6 +84,25 @@ type BackendDeploymentTransactionRequest = {
   simulation_summary?: string | null
 }
 
+type BackendDeploymentFeeEstimate = {
+  program_size_bytes: number
+  program_sha256?: string | null
+  program_data_space_bytes?: number | null
+  program_account_space_bytes?: number | null
+  rent_lamports: number
+  estimated_network_fee_lamports: number
+  service_fee_lamports: number
+  total_lamports: number
+  calculation_basis?: string | null
+  estimate_expires_at: string
+  payment_recipient: string
+}
+
+type BackendErrorInfo = {
+  code?: string
+  message?: string
+} | null
+
 export type BackendDeploymentJob = {
   job_id: string
   status: string
@@ -100,7 +120,14 @@ export type BackendDeploymentJob = {
   transaction_signatures?: string[]
   deployment_refs?: string[]
   verification_status_at_deploy?: string | null
+  upgrade_authority_verified?: boolean
+  squads_authority_validation_status?: string
+  deployment_estimate?: BackendDeploymentFeeEstimate | null
+  payment_request?: BackendDeploymentTransactionRequest | null
+  payment_signature?: string | null
+  refund_signature?: string | null
   signature_request?: BackendDeploymentTransactionRequest | null
+  error?: BackendErrorInfo
 }
 
 type BackendSuggestion = {
@@ -315,12 +342,9 @@ export async function approveProjectCvlrSpec({
   backendBaseUrl: string
   projectId: string
 }): Promise<ProjectSnapshot> {
-  const response = await fetch(
-    `${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/cvlr-specs/approve`,
-    {
-      method: 'POST',
-    },
-  )
+  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/projects/${projectId}/cvlr-specs/approve`, {
+    method: 'POST',
+  })
   if (!response.ok) {
     throw new Error('CVLR spec approval failed. Try again when the backend is reachable.')
   }
@@ -412,8 +436,8 @@ export async function saveDesignDocToProject({
   if (!response.ok) {
     throw new Error('Design Doc save failed. Try again when the backend is reachable.')
   }
-  const payload = (await response.json()) as BackendProjectSnapshot
-  return normalizeProjectSnapshot(payload)
+  await response.json()
+  return readProjectSnapshot({ backendBaseUrl, projectId })
 }
 
 export function deriveLatestPromptSeed(messages: ChatMessage[]): MvpProjectSeed | null {
@@ -473,7 +497,14 @@ export function normalizeDeploymentJob(job: BackendDeploymentJob): DeploymentJob
     transactionSignatures: job.transaction_signatures ?? [],
     deploymentRefs: job.deployment_refs ?? [],
     verificationStatusAtDeploy: job.verification_status_at_deploy ?? null,
+    upgradeAuthorityVerified: job.upgrade_authority_verified ?? false,
+    squadsAuthorityValidationStatus: job.squads_authority_validation_status ?? 'not_applicable',
+    deploymentEstimate: normalizeDeploymentEstimate(job.deployment_estimate),
+    paymentRequest: normalizeDeploymentSignatureRequest(job.payment_request),
+    paymentSignature: job.payment_signature ?? null,
+    refundSignature: job.refund_signature ?? null,
     signatureRequest: normalizeDeploymentSignatureRequest(job.signature_request),
+    errorMessage: job.error?.message ?? null,
   }
 }
 
@@ -539,6 +570,28 @@ function normalizeDeploymentSignatureRequest(
   }
 }
 
+function normalizeDeploymentEstimate(
+  estimate: BackendDeploymentFeeEstimate | null | undefined,
+): DeploymentFeeEstimate | null {
+  if (!estimate) {
+    return null
+  }
+
+  return {
+    programSizeBytes: estimate.program_size_bytes,
+    programSha256: estimate.program_sha256 ?? null,
+    programDataSpaceBytes: estimate.program_data_space_bytes ?? null,
+    programAccountSpaceBytes: estimate.program_account_space_bytes ?? null,
+    rentLamports: estimate.rent_lamports,
+    estimatedNetworkFeeLamports: estimate.estimated_network_fee_lamports,
+    serviceFeeLamports: estimate.service_fee_lamports,
+    totalLamports: estimate.total_lamports,
+    calculationBasis: estimate.calculation_basis ?? null,
+    estimateExpiresAt: estimate.estimate_expires_at,
+    paymentRecipient: estimate.payment_recipient,
+  }
+}
+
 function normalizeWorkflowMode(value: unknown): WorkflowMode {
   if (value === 'vibe_coding') {
     return 'vibe_coding'
@@ -590,7 +643,9 @@ function normalizeSuggestions(suggestions: BackendProjectSnapshot['suggestions']
   }))
 }
 
-function normalizeVerificationProperties(properties: BackendProjectSnapshot['verification_properties']): VerificationProperty[] {
+function normalizeVerificationProperties(
+  properties: BackendProjectSnapshot['verification_properties'],
+): VerificationProperty[] {
   return (properties ?? []).map((property, index) => ({
     id: property.property_id ?? property.id ?? `backend-property-${index + 1}`,
     label: property.label,

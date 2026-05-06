@@ -7,11 +7,11 @@ import {
   buildGenerationRequest,
   createClearedChatState,
   createInitialMvpShellState,
-  DEVNET_DEPLOYMENT_DEMO_WARNING,
   deriveChatProjectRouteDecision,
   getDeployableGenerationArtifact,
   getDeploymentStatusLabel,
   getDevnetDeploymentBlocker,
+  getGenerationArtifactDeploymentKind,
   getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
@@ -59,7 +59,7 @@ import {
   bytesToBase64,
   decodeBase64Transaction,
   readDeploymentJobStatus,
-  submitDeploymentSignature,
+  submitDeploymentPayment,
   submitDevnetDeploymentJob,
 } from '../features/mvp-shell/deployment'
 import { readGenerationJobStatus, submitGenerationJob } from '../features/mvp-shell/generation'
@@ -89,8 +89,23 @@ type AppSettings = {
 const MVP_SHELL_STORAGE_KEY = 'verified-spec-dev.mvp-shell'
 const ACTIVE_PROJECT_STORAGE_KEY = 'verified-spec-dev.active-project'
 const LOCAL_BACKEND_BASE_URL = 'http://10.0.2.2:8000'
-const PROGRAM_DEPLOYMENT_FLOW_ENABLED = false
+const PROGRAM_DEPLOYMENT_FLOW_ENABLED = true
 const PROGRAM_DEPLOYMENT_DISABLED_MESSAGE = 'Program deployment is disabled until this flow has been tested end to end.'
+
+function getDesignDocAutosaveKey(designDoc: MvpDesignDoc | null) {
+  if (!designDoc) {
+    return null
+  }
+
+  return JSON.stringify({
+    title: designDoc.title,
+    goal: designDoc.goal,
+    coreRequirements: designDoc.coreRequirements,
+    assumptions: designDoc.assumptions,
+    missingInformation: designDoc.missingInformation,
+    updatedAt: designDoc.updatedAt,
+  })
+}
 
 function getWalletErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
@@ -140,6 +155,7 @@ export function SpecDrivenApp() {
   const [exploreTab, setExploreTab] = useState<ExploreTab>('projects')
   const [walletError, setWalletError] = useState<string | null>(null)
   const [deploymentError, setDeploymentError] = useState<string | null>(null)
+  const [squadsUpgradeAuthorityAddress, setSquadsUpgradeAuthorityAddress] = useState('')
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [isRefreshingDeploymentStatus, setIsRefreshingDeploymentStatus] = useState(false)
   const [isSigningDeployment, setIsSigningDeployment] = useState(false)
@@ -156,6 +172,7 @@ export function SpecDrivenApp() {
   const designDocSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const skipAutoProjectHydrate = useRef(false)
   const skipNextDesignDocAutosave = useRef(false)
+  const lastDesignDocAutosaveKey = useRef<string | null>(null)
   const workspaceScrollRef = useRef<ScrollView>(null)
   const workspaceCardOffsets = useRef<Partial<Record<WorkspaceCardTarget, number>>>({})
   const designDocSectionOffsets = useRef<Partial<Record<DesignDocScrollTarget, number>>>({})
@@ -175,6 +192,7 @@ export function SpecDrivenApp() {
 
   function applyBackendSnapshot(snapshot: ProjectSnapshot, mode: 'replace' | 'merge' = 'replace') {
     skipNextDesignDocAutosave.current = true
+    lastDesignDocAutosaveKey.current = getDesignDocAutosaveKey(snapshot.state.designDoc)
     if (mode === 'merge') {
       setMvpState((currentState) => mergeBackendProjectState(snapshot.state, currentState))
     } else {
@@ -207,6 +225,7 @@ export function SpecDrivenApp() {
 
         if (!isCancelled && restoredState) {
           skipNextDesignDocAutosave.current = true
+          lastDesignDocAutosaveKey.current = getDesignDocAutosaveKey(restoredState.designDoc)
           setMvpState(restoredState)
         }
         if (!isCancelled && storedProjectId) {
@@ -287,8 +306,18 @@ export function SpecDrivenApp() {
       return
     }
 
+    const designDocAutosaveKey = getDesignDocAutosaveKey(mvpState.designDoc)
+    if (!designDocAutosaveKey) {
+      return
+    }
+
     if (skipNextDesignDocAutosave.current) {
       skipNextDesignDocAutosave.current = false
+      lastDesignDocAutosaveKey.current = designDocAutosaveKey
+      return
+    }
+
+    if (lastDesignDocAutosaveKey.current === designDocAutosaveKey) {
       return
     }
 
@@ -304,6 +333,7 @@ export function SpecDrivenApp() {
         designDoc: designDocToSave,
       })
         .then((snapshot) => {
+          lastDesignDocAutosaveKey.current = designDocAutosaveKey
           setMvpState((currentState) =>
             areDesignDocsEqual(currentState.designDoc, designDocToSave) ? snapshot.state : currentState,
           )
@@ -543,10 +573,18 @@ export function SpecDrivenApp() {
   function handleApproveDesignDocSection(sectionKey: DesignDocSectionKey) {
     setApprovedDesignDocSections((current) => {
       const alreadyApproved = current.includes(sectionKey)
-      const nextApprovedSections = alreadyApproved ? current.filter((key) => key !== sectionKey) : [...current, sectionKey]
+      const nextApprovedSections = alreadyApproved
+        ? current.filter((key) => key !== sectionKey)
+        : [...current, sectionKey]
 
       if (!alreadyApproved) {
-        const sectionOrder: DesignDocSectionKey[] = ['title', 'goal', 'coreRequirements', 'assumptions', 'missingInformation']
+        const sectionOrder: DesignDocSectionKey[] = [
+          'title',
+          'goal',
+          'coreRequirements',
+          'assumptions',
+          'missingInformation',
+        ]
         const currentIndex = sectionOrder.indexOf(sectionKey)
         const nextSection =
           currentIndex >= 0
@@ -775,14 +813,15 @@ export function SpecDrivenApp() {
       return
     }
 
-    const blocker = getDevnetDeploymentBlocker(mvpState, Boolean(accountAddress))
+    const finalAuthorityAddress = squadsUpgradeAuthorityAddress.trim() || mvpState.deploymentJob?.authorityWallet?.trim() || ''
+    const blocker = getDevnetDeploymentBlocker(mvpState, Boolean(accountAddress), finalAuthorityAddress)
     if (blocker) {
       setDeploymentError(blocker)
       return
     }
 
     const artifact = getDeployableGenerationArtifact(mvpState.generationJob)
-    if (!artifact || !accountAddress) {
+    if (!artifact || !accountAddress || !finalAuthorityAddress) {
       setDeploymentError('Devnet deployment is unavailable for this generated result.')
       return
     }
@@ -793,7 +832,7 @@ export function SpecDrivenApp() {
     try {
       const job = await submitDevnetDeploymentJob({
         artifact,
-        authorityWallet: accountAddress,
+        authorityWallet: finalAuthorityAddress,
         backendBaseUrl: LOCAL_BACKEND_BASE_URL,
         payerWallet: accountAddress,
         projectId: activeProjectId,
@@ -808,16 +847,15 @@ export function SpecDrivenApp() {
     }
   }
 
-  async function handleDeploymentSign() {
+  async function handleDeploymentPay() {
     if (!PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
       setDeploymentError(PROGRAM_DEPLOYMENT_DISABLED_MESSAGE)
       return
     }
 
     const deploymentJob = mvpState.deploymentJob
-    const signatureRequest = deploymentJob?.signatureRequest
 
-    if (!deploymentJob || !signatureRequest || isSigningDeployment) {
+    if (!deploymentJob || isSigningDeployment) {
       return
     }
 
@@ -825,24 +863,46 @@ export function SpecDrivenApp() {
     setIsSigningDeployment(true)
 
     try {
-      const transaction = decodeBase64Transaction(signatureRequest.transactionBase64)
-      const minContextSlot = signatureRequest.minContextSlot ? BigInt(signatureRequest.minContextSlot) : 0n
-      const signatureBytes = await signAndSendTransaction(transaction, minContextSlot)
-      const updatedJob = await submitDeploymentSignature({
+      const authorityWallet = deploymentJob.authorityWallet?.trim() || squadsUpgradeAuthorityAddress.trim()
+      const payerWallet = accountAddress || deploymentJob.payerWallet || ''
+      const refreshedJob = await submitDevnetDeploymentJob({
+        artifact: {
+          artifactId: deploymentJob.sourceArtifactId,
+          name: deploymentJob.sourceArtifactId,
+          path: deploymentJob.sourceArtifactId,
+          summary: 'Existing generated deployment artifact.',
+          typeLabel: 'deployment_artifact',
+        },
+        authorityWallet,
         backendBaseUrl: LOCAL_BACKEND_BASE_URL,
-        job: deploymentJob,
-        signatureBase64: bytesToBase64(signatureBytes),
+        payerWallet,
+        projectId: activeProjectId,
+        verificationStatusAcknowledged: mvpState.generationJob?.status ?? deploymentJob.verificationStatusAtDeploy ?? 'unknown',
+      })
+      const paymentRequest = refreshedJob.paymentRequest
+      if (!paymentRequest) {
+        setMvpState((currentState) => saveDeploymentJob(currentState, refreshedJob))
+        throw new Error('Deployment payment request is not available. Refresh deployment status and try again.')
+      }
+      setMvpState((currentState) => saveDeploymentJob(currentState, refreshedJob))
+      const transaction = decodeBase64Transaction(paymentRequest.transactionBase64)
+      const minContextSlot = paymentRequest.minContextSlot ? BigInt(paymentRequest.minContextSlot) : 0n
+      const signatureBytes = await signAndSendTransaction(transaction, minContextSlot)
+      const updatedJob = await submitDeploymentPayment({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+        job: refreshedJob,
+        paymentSignatureBase64: bytesToBase64(signatureBytes),
       })
 
       setMvpState((currentState) => saveDeploymentJob(currentState, updatedJob))
     } catch (error) {
-      setDeploymentError(error instanceof Error ? error.message : 'Wallet signing failed. Try again from your wallet.')
+      setDeploymentError(error instanceof Error ? error.message : 'Wallet payment failed. Try again from your wallet.')
     } finally {
       setIsSigningDeployment(false)
     }
   }
 
-  async function handleDeploymentRefresh() {
+  const handleDeploymentRefresh = useCallback(async () => {
     if (!PROGRAM_DEPLOYMENT_FLOW_ENABLED) {
       setDeploymentError(PROGRAM_DEPLOYMENT_DISABLED_MESSAGE)
       return
@@ -865,7 +925,22 @@ export function SpecDrivenApp() {
     } finally {
       setIsRefreshingDeploymentStatus(false)
     }
-  }
+  }, [isRefreshingDeploymentStatus, mvpState.deploymentJob])
+
+  useEffect(() => {
+    const job = mvpState.deploymentJob
+    if (!job || !isActiveDeploymentJob(job.status)) {
+      return
+    }
+
+    const timer = setInterval(() => {
+      void handleDeploymentRefresh()
+    }, 10000)
+
+    return () => {
+      clearInterval(timer)
+    }
+  }, [handleDeploymentRefresh, mvpState.deploymentJob])
 
   function showPreviousSuggestions() {
     setSuggestionPage((currentPage) => (currentPage <= 0 ? suggestionPageCount - 1 : currentPage - 1))
@@ -967,6 +1042,7 @@ export function SpecDrivenApp() {
                   isSigningDeployment={isSigningDeployment}
                   isSubmittingDeployment={isSubmittingDeployment}
                   isSubmittingGeneration={isSubmittingGeneration}
+                  squadsUpgradeAuthorityAddress={squadsUpgradeAuthorityAddress}
                   approvedDesignDocSections={approvedDesignDocSections}
                   onAppSettingChange={updateAppSetting}
                   onApproveDesignDoc={handleApproveDesignDoc}
@@ -983,8 +1059,9 @@ export function SpecDrivenApp() {
                   onDeploymentRefresh={handleDeploymentRefresh}
                   onGoToWorkspaceCard={handleGoToWorkspaceCard}
                   onWorkspaceCardLayout={handleWorkspaceCardLayout}
-                  onDeploymentSign={handleDeploymentSign}
+                  onDeploymentSign={handleDeploymentPay}
                   onDeploymentStart={handleDeploymentStart}
+                  onSquadsUpgradeAuthorityChange={setSquadsUpgradeAuthorityAddress}
                   isPublishing={isPublishing}
                   publishedAt={mvpState.publishedAt}
                   onApplyVibeDefaults={handleApplyVibeDefaults}
@@ -1472,6 +1549,7 @@ function WorkspaceView({
   latestPromptSeed,
   mode,
   publishedAt,
+  squadsUpgradeAuthorityAddress,
   verificationProperties,
   verificationPropertiesApprovedAt,
   workflowMode,
@@ -1495,6 +1573,7 @@ function WorkspaceView({
   onModeChange,
   onPublish,
   onSuggestProperty,
+  onSquadsUpgradeAuthorityChange,
   onWalletPress,
   onWorkspaceCardLayout,
   walletConnected,
@@ -1523,6 +1602,7 @@ function WorkspaceView({
   latestPromptSeed: MvpProjectSeed | null
   mode: DisplayWorkflowMode
   publishedAt: string | null
+  squadsUpgradeAuthorityAddress: string
   verificationProperties: VerificationProperty[]
   verificationPropertiesApprovedAt: string | null
   workflowMode: WorkflowMode
@@ -1546,6 +1626,7 @@ function WorkspaceView({
   onModeChange: (value: DisplayWorkflowMode) => void
   onPublish: () => void
   onSuggestProperty: (text: string) => void
+  onSquadsUpgradeAuthorityChange: (value: string) => void
   onWalletPress: () => void
   onWorkspaceCardLayout: (target: WorkspaceCardTarget, y: number) => void
   walletConnected: boolean
@@ -1564,6 +1645,10 @@ function WorkspaceView({
         verificationPropertiesApprovedAt={verificationPropertiesApprovedAt}
         onGoToCard={onGoToWorkspaceCard}
       />
+
+      <View onLayout={(event) => onWorkspaceCardLayout('daily-property', event.nativeEvent.layout.y)}>
+        <DailyPropertyCard designDocApprovedAt={designDocApprovedAt} onSuggestProperty={onSuggestProperty} />
+      </View>
 
       <View onLayout={(event) => onWorkspaceCardLayout('design-doc', event.nativeEvent.layout.y)}>
         <DesignDocCard
@@ -1611,10 +1696,6 @@ function WorkspaceView({
         />
       </View>
 
-      <View onLayout={(event) => onWorkspaceCardLayout('daily-property', event.nativeEvent.layout.y)}>
-        <DailyPropertyCard designDocApprovedAt={designDocApprovedAt} onSuggestProperty={onSuggestProperty} />
-      </View>
-
       {PROGRAM_DEPLOYMENT_FLOW_ENABLED ? (
         <>
           <View onLayout={(event) => onWorkspaceCardLayout('deployment', event.nativeEvent.layout.y)}>
@@ -1626,9 +1707,11 @@ function WorkspaceView({
               isRefreshingDeploymentStatus={isRefreshingDeploymentStatus}
               isSigningDeployment={isSigningDeployment}
               isSubmittingDeployment={isSubmittingDeployment}
+              squadsUpgradeAuthorityAddress={squadsUpgradeAuthorityAddress}
               walletConnected={walletConnected}
               onRefresh={onDeploymentRefresh}
               onSign={onDeploymentSign}
+              onSquadsUpgradeAuthorityChange={onSquadsUpgradeAuthorityChange}
               onStart={onDeploymentStart}
             />
           </View>
@@ -1652,8 +1735,8 @@ function WorkspaceView({
               </Text>
               <Text className="text-sm leading-5 text-[#dffdf4]/70">
                 {publishedAt
-                  ? 'Your project title and verification properties are visible in the Explore tab.'
-                  : 'Opt in to make your project title and verification properties visible to other builders in the Explore tab.'}
+                  ? 'Your project is now visible in Explore.'
+                  : 'Share this project in Explore.'}
               </Text>
             </View>
             <View className={`rounded-full px-3 py-2 ${publishedAt ? 'bg-[#75e6be]/25' : 'bg-[#75e6be]/15'}`}>
@@ -1683,7 +1766,7 @@ function WorkspaceView({
           <View>
             <Text className="text-base font-black text-[#fff4cf]">Assistant mode</Text>
             <Text className="mt-1 text-sm leading-5 text-[#fff4cf]/65">
-              Vibe keeps the conversation loose. Pro asks for sharper rules and property-ready details.
+              Vibe is more flexible. Pro is more strict.
             </Text>
           </View>
           <ModeSwitch mode={mode} onModeChange={onModeChange} />
@@ -1693,7 +1776,7 @@ function WorkspaceView({
           body={
             walletConnected && accountAddress
               ? `Connected on Solana devnet: ${accountAddress.slice(0, 8)}...${accountAddress.slice(-6)}`
-              : 'Uses the existing Solana Mobile wallet adapter from the template.'
+              : 'Connect a wallet when you are ready.'
           }
           title="Solana wallet"
           value={walletConnected ? 'Ready' : 'Needed later'}
@@ -1723,7 +1806,7 @@ function WorkspaceView({
           status="Not active"
         />
         <EditableSettingRow
-          body="Certora access is not used by the current app flow."
+          body="This field would be for a future Certora hosted prover integration. The current app backend already uses a locally hosted Certora prover flow."
           disabled
           onChangeText={(value) => onAppSettingChange('certoraApiKey', value)}
           placeholder="Certora API key"
@@ -1768,12 +1851,18 @@ function getDeploymentStatusBadgeClass(status: string) {
     case 'Queued':
       return 'bg-[#9db4ff]/18'
     case 'Running':
+    case 'Verifying authority':
+    case 'Confirming payment':
+    case 'Deploying':
       return 'bg-[#ffd978]/18'
     case 'Signature needed':
+    case 'Payment required':
       return 'bg-[#ffd978]/20'
     case 'Succeeded':
+    case 'Refunded':
       return 'bg-[#75e6be]/15'
     case 'Failed':
+    case 'Refund pending':
       return 'bg-[#ff8a5c]/18'
     case 'Unavailable':
     default:
@@ -1793,6 +1882,26 @@ function formatShortIdentifier(value: string | null | undefined) {
     return value
   }
   return `${value.slice(0, 14)}...${value.slice(-10)}`
+}
+
+function formatLamportsAsSol(lamports: number) {
+  return `${(lamports / 1_000_000_000).toFixed(6).replace(/0+$/, '').replace(/\.$/, '')} SOL`
+}
+
+function getSquadsAuthorityValidationLabel(status: string) {
+  switch (status) {
+    case 'valid':
+      return 'validated'
+    case 'invalid':
+      return 'invalid'
+    case 'unavailable':
+      return 'unavailable'
+    case 'not_implemented':
+      return 'not verified yet'
+    case 'not_applicable':
+    default:
+      return 'not applicable'
+  }
 }
 
 function DesignDocCard({
@@ -1900,7 +2009,7 @@ function DesignDocCard({
         <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
         <Text className="text-lg font-black text-[#eef2ff]">Not generated yet</Text>
         <Text className="text-sm leading-6 text-[#eef2ff]/75">
-          Submit a prompt in Chat to provision one editable MVP Design Doc for review before generation.
+          Start in Chat to create your first draft.
         </Text>
       </View>
     )
@@ -1913,7 +2022,7 @@ function DesignDocCard({
           <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
           <Text className="text-2xl font-black leading-7 text-[#eef2ff]">Editable review surface</Text>
           <Text className="text-sm leading-6 text-[#eef2ff]/70">
-            Review and approve this single MVP artifact before properties are proposed.
+            Review this draft, make edits, then approve it.
           </Text>
         </View>
         <View className={`rounded-full px-3 py-2 ${approvedAt ? 'bg-[#75e6be]/15' : 'bg-[#9db4ff]/15'}`}>
@@ -1942,8 +2051,8 @@ function DesignDocCard({
           <Text className="text-xs font-black uppercase tracking-widest text-[#ffd2bd]">Generation gate</Text>
           <Text className="text-sm leading-5 text-[#ffd2bd]/85">
             {modeLabel === 'Vibe'
-              ? 'Vibe can ask the backend to turn missing details into visible assumptions before generation.'
-              : 'Pro requires these missing details to be answered or edited away before generation.'}
+              ? 'Missing details can be filled in before generation.'
+              : 'Fill in the missing details before generation.'}
           </Text>
           {modeLabel === 'Vibe' ? (
             <Pressable
@@ -1970,8 +2079,8 @@ function DesignDocCard({
             <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Approval</Text>
             <Text className="text-sm leading-5 text-[#dffdf4]/80">
               {approvedAt
-                ? `Approved ${formatSavedAt(approvedAt)}. Editing the Design Doc will reset this approval.`
-                : 'Approve this Design Doc when the plan looks right. After approval, the app can suggest the specifications for formal verification.'}
+                ? `Approved ${formatSavedAt(approvedAt)}. Editing this draft will clear approval.`
+                : 'Approve this draft when it looks right.'}
             </Text>
           </View>
           {approvedAt ? (
@@ -1997,7 +2106,7 @@ function DesignDocCard({
           <View className="min-w-0 flex-1 gap-1">
             <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation submission</Text>
             <Text className="text-sm leading-5 text-[#eef2ff]/70">
-              Submit this MVP Design Doc to Certora Prover for formal verification.
+              Send this draft to the current verification flow. A future version could use Certora's hosted prover.
             </Text>
           </View>
           <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob?.status ?? 'ready')}`}>
@@ -2115,7 +2224,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 1',
       title: 'Describe your program',
-      body: 'Go to Chat and describe the Solana program you want to build.',
+      body: 'Go to Chat and describe what you want to build.',
       target: 'chat',
     }
   }
@@ -2123,7 +2232,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 2',
       title: 'Approve the Design Doc',
-      body: 'Review the auto-drafted Design Doc below and tap Approve when it looks right.',
+      body: 'Review the draft below and approve it when it looks right.',
       target: 'design-doc',
     }
   }
@@ -2131,7 +2240,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 3',
       title: 'Waiting on properties',
-      body: 'The backend is proposing verification properties. Refresh the project to check.',
+      body: 'The app is preparing the next checks. Refresh to check again.',
       target: 'properties',
     }
   }
@@ -2139,7 +2248,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 3',
       title: 'Approve verification properties',
-      body: 'Review the proposed properties and approve them to continue toward formal verification.',
+      body: 'Review these checks and approve them to continue.',
       target: 'properties',
     }
   }
@@ -2147,7 +2256,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 4',
       title: 'Generate formal verification specs',
-      body: 'Create the specifications that describe what formal verification should prove.',
+      body: 'Create the verification spec for this project.',
       target: 'cvlr-spec',
     }
   }
@@ -2155,7 +2264,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 5',
       title: 'Approve formal verification specs',
-      body: 'Review the generated spec below and approve it to submit to AI Composer.',
+      body: 'Review the generated spec and approve it to continue.',
       target: 'cvlr-spec',
     }
   }
@@ -2164,7 +2273,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 6',
       title: 'AI Composer is running',
-      body: 'Generation is in progress. Tap Refresh to check the latest status.',
+      body: 'Generation is in progress. Refresh to check status.',
       target: 'design-doc',
     }
   }
@@ -2172,7 +2281,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 6',
       title: 'Review generation result',
-      body: 'The generation job finished with an issue. Check the log and retry from the Design Doc card.',
+      body: 'Generation hit an issue. Check the status and try again.',
       target: 'design-doc',
     }
   }
@@ -2182,7 +2291,7 @@ function deriveSuggestedNextAction(props: {
       return {
         eyebrow: 'Step 7',
         title: 'Deploy to devnet',
-        body: 'Your program is generated. Connect a wallet and deploy it to Solana devnet.',
+        body: 'Your program is ready. Connect a wallet to deploy it.',
         target: 'deployment',
       }
     }
@@ -2191,7 +2300,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: PROGRAM_DEPLOYMENT_FLOW_ENABLED ? 'Step 8' : 'Step 7',
       title: 'Publish to Explore',
-      body: 'Share your approved project and verification properties with the community by opting in below.',
+      body: 'Share your project with the community.',
       target: 'publish',
     }
   }
@@ -2199,8 +2308,8 @@ function deriveSuggestedNextAction(props: {
     eyebrow: 'Keep going',
     title: 'Add another invariant',
     body: PROGRAM_DEPLOYMENT_FLOW_ENABLED
-      ? 'Your program is live and published. Strengthen its guarantees by adding one more verification property today.'
-      : 'Your project is published. Strengthen its guarantees by adding one more verification property today.',
+      ? 'Your project is live. Add one more check today.'
+      : 'Your project is published. Add one more check today.',
     target: 'daily-property',
   }
 }
@@ -2247,8 +2356,13 @@ function SuggestedNextActionCard({
           <Text className="text-xl font-black leading-6 text-[#fff4cf]">{action.title}</Text>
           <Text className="text-sm leading-5 text-[#fff4cf]/70">{action.body}</Text>
         </View>
-        <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
-          <Text className="text-xs font-black text-[#ffe6a3]">{action.eyebrow}</Text>
+        <View className="items-end gap-2">
+          <View className="rounded-full bg-[#8bffb0]/18 px-3 py-2">
+            <Text className="text-xs font-black text-[#b8ffcb]">+10 XP</Text>
+          </View>
+          <View className="rounded-full bg-[#ffd978]/15 px-3 py-2">
+            <Text className="text-xs font-black text-[#ffe6a3]">{action.eyebrow}</Text>
+          </View>
         </View>
       </View>
       <Pressable
@@ -2278,15 +2392,19 @@ function DailyPropertyCard({
     <View className="gap-3 rounded-lg border border-[#c8d6ff]/20 bg-[#1a1f2e] p-4">
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Today challenge</Text>
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Daily challenge</Text>
           <Text className="text-xl font-black leading-6 text-[#fff4cf]">Add one more invariant</Text>
           <Text className="text-sm leading-5 text-[#fff4cf]/70">
-            Each property you add strengthens the formal guarantees of your program. Describe one in plain language and
-            discuss it in Chat.
+            Add one more check in plain language, then discuss it in Chat.
           </Text>
         </View>
-        <View className="rounded-full bg-[#c8d6ff]/15 px-3 py-2">
-          <Text className="text-xs font-black text-[#c8d6ff]">Daily</Text>
+        <View className="items-end gap-2">
+          <View className="rounded-full bg-[#8bffb0]/18 px-3 py-2">
+            <Text className="text-xs font-black text-[#b8ffcb]">+50 XP</Text>
+          </View>
+          <View className="rounded-full bg-[#c8d6ff]/15 px-3 py-2">
+            <Text className="text-xs font-black text-[#c8d6ff]">Daily</Text>
+          </View>
         </View>
       </View>
       <TextInput
@@ -2323,7 +2441,7 @@ function ProgramDeploymentDisabledCard() {
           <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Program deployment</Text>
           <Text className="text-xl font-black leading-6 text-[#eef2ff]">Disabled for this build</Text>
           <Text className="text-sm leading-5 text-[#eef2ff]/65">
-            Devnet deployment and wallet signing are paused until the full deployment flow has been tested.
+            Deployment is turned off in this build for now.
           </Text>
         </View>
         <View className="rounded-full bg-[#eef2ff]/10 px-3 py-2">
@@ -2345,7 +2463,7 @@ function ProgramHealthCard({ deploymentJob }: { deploymentJob: DeploymentJobReco
           <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Program activity</Text>
           <Text className="text-xl font-black leading-6 text-[#fff4cf]">On-chain monitor</Text>
           <Text className="text-sm leading-5 text-[#fff4cf]/70">
-            Live transaction counts, account changes, and error rates for your deployed program will appear here.
+            Activity for your deployed program will appear here.
           </Text>
         </View>
         <View className="rounded-full bg-[#fff4cf]/10 px-3 py-2">
@@ -2506,7 +2624,7 @@ function PropertiesToProveCard({
         <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
         <Text className="text-lg font-black text-[#fff4cf]">Waiting on Design Doc approval</Text>
         <Text className="text-sm leading-6 text-[#fff4cf]/70">
-          Approve the Design Doc above before the app suggests the properties to prove.
+          Approve the Design Doc first.
         </Text>
       </View>
     )
@@ -2521,8 +2639,7 @@ function PropertiesToProveCard({
           <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
           <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Review the properties to prove</Text>
           <Text className="text-sm leading-6 text-[#fff4cf]/70">
-            These proof targets come from the approved Design Doc and must be approved before the app generates formal
-            verification specifications.
+            These checks come from the approved Design Doc. Approve them to continue.
           </Text>
         </View>
         <View className={`rounded-full px-3 py-2 ${approved ? 'bg-[#75e6be]/15' : 'bg-[#ffd978]/15'}`}>
@@ -2544,7 +2661,7 @@ function PropertiesToProveCard({
 
       {propertiesApprovedAt ? (
         <Text className="rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 px-3 py-2 text-sm leading-5 text-[#dffdf4]">
-          Approved {formatSavedAt(propertiesApprovedAt)}. Editing the Design Doc will reset these properties.
+          Approved {formatSavedAt(propertiesApprovedAt)}. Editing the Design Doc will clear these.
         </Text>
       ) : (
         <Pressable
@@ -2571,8 +2688,10 @@ function DeploymentCard({
   isRefreshingDeploymentStatus,
   isSigningDeployment,
   isSubmittingDeployment,
+  squadsUpgradeAuthorityAddress,
   onRefresh,
   onSign,
+  onSquadsUpgradeAuthorityChange,
   onStart,
   walletConnected,
 }: {
@@ -2583,13 +2702,23 @@ function DeploymentCard({
   isRefreshingDeploymentStatus: boolean
   isSigningDeployment: boolean
   isSubmittingDeployment: boolean
+  squadsUpgradeAuthorityAddress: string
   onRefresh: () => void
   onSign: () => void
+  onSquadsUpgradeAuthorityChange: (value: string) => void
   onStart: () => void
   walletConnected: boolean
 }) {
   const deployableArtifact = getDeployableGenerationArtifact(generationJob)
+  const deploymentArtifactKind = getGenerationArtifactDeploymentKind(deployableArtifact)
+  const deploymentArtifactLabel =
+    deploymentArtifactKind === 'program_binary' ? 'Program binary' : 'SBF build source'
+  const deploymentArtifactHelp =
+    deploymentArtifactKind === 'program_binary'
+      ? 'This file is ready for deployment.'
+      : 'The app will build this project before deployment.'
   const deploymentStatus = deploymentJob?.status ?? ''
+  const effectiveSquadsAuthorityAddress = squadsUpgradeAuthorityAddress.trim() || deploymentJob?.authorityWallet || ''
   const blocker = getDevnetDeploymentBlocker(
     {
       ...createInitialMvpShellState(),
@@ -2597,22 +2726,41 @@ function DeploymentCard({
       deploymentJob,
     },
     walletConnected,
+    effectiveSquadsAuthorityAddress,
   )
-  const hasSignatureRequest = Boolean(deploymentJob?.signatureRequest)
+  const hasPaymentRequest = Boolean(deploymentJob?.paymentRequest)
+  const isRecoverableQueuedDeployment =
+    deploymentStatus === 'queued' && !deploymentJob?.paymentRequest && !deploymentJob?.deploymentEstimate
   const hasBlockingDeploymentJob =
     Boolean(deploymentJob) &&
-    !hasSignatureRequest &&
-    (isActiveDeploymentJob(deploymentStatus) || deploymentStatus === 'blocked' || deploymentStatus === 'succeeded')
+    !hasPaymentRequest &&
+    !isRecoverableQueuedDeployment &&
+    (isActiveDeploymentJob(deploymentStatus) ||
+      deploymentStatus === 'blocked' ||
+      deploymentStatus === 'succeeded' ||
+      deploymentStatus === 'refunded')
   const deploymentBlocked = Boolean(blocker) || isSubmittingDeployment || hasBlockingDeploymentJob
+  const deploymentFailureMessage =
+    deploymentStatus === 'failed' ? deploymentJob?.errorMessage || deploymentJob?.summary || null : null
   const startButtonLabel = isSubmittingDeployment
-    ? 'Preparing deploy...'
+    ? 'Estimating cost...'
     : deploymentStatus === 'succeeded'
       ? 'Deployed to devnet'
-      : deploymentStatus === 'blocked'
-        ? 'Refresh deployment'
-        : blocker
-          ? 'Deploy unavailable'
-          : 'Deploy to devnet'
+      : deploymentStatus === 'failed'
+        ? 'Retry deploy estimate'
+      : deploymentStatus === 'authority_verification_pending'
+        ? 'Verifying authority...'
+        : deploymentStatus === 'deploying'
+          ? 'Backend deploying...'
+          : deploymentStatus === 'payment_confirming'
+            ? 'Confirming payment...'
+            : deploymentStatus === 'blocked'
+              ? 'Refresh deployment'
+              : deploymentStatus === 'refunded'
+                ? 'Payment refunded'
+                : blocker
+                  ? 'Deploy unavailable'
+                  : 'Estimate deploy cost'
 
   return (
     <View className="gap-4 rounded-lg border border-[#75e6be]/25 bg-[#152f2d] p-4">
@@ -2621,7 +2769,7 @@ function DeploymentCard({
           <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Devnet deployment</Text>
           <Text className="text-2xl font-black leading-7 text-[#dffdf4]">Deploy generated program</Text>
           <Text className="text-sm leading-6 text-[#dffdf4]/70">
-            Backend prepares the generated artifact. Your connected wallet signs the devnet deployment transaction.
+            The app estimates cost first. Then your wallet approves payment and the deployment finishes in the background.
           </Text>
         </View>
         <View className={`rounded-full px-3 py-2 ${getDeploymentStatusBadgeClass(deploymentJob?.status ?? 'ready')}`}>
@@ -2633,17 +2781,38 @@ function DeploymentCard({
 
       {deployableArtifact ? (
         <View className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployable artifact</Text>
+          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">
+            {deploymentArtifactLabel}
+          </Text>
           <Text className="text-sm font-black text-[#eef2ff]">{deployableArtifact.name}</Text>
           <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
             {deployableArtifact.artifactId}
           </Text>
+          <Text className="text-xs leading-5 text-[#dffdf4]/60">{deploymentArtifactHelp}</Text>
         </View>
       ) : (
         <Text className="rounded-lg border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-2 text-sm leading-5 text-[#eef2ff]/70">
-          Generate a Solana program artifact before devnet deployment.
+          Generate a program before deployment.
         </Text>
       )}
+
+      <View className="gap-2 rounded-lg border border-[#adf7e6]/15 bg-[#0e2424] p-3">
+        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Squads upgrade authority</Text>
+        <TextInput
+          accessibilityLabel="Squads upgrade authority address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          className="rounded-lg border border-[#adf7e6]/20 bg-[#dffdf4]/8 px-3 py-3 text-sm font-semibold text-[#dffdf4]"
+          editable={!deploymentJob}
+          onChangeText={onSquadsUpgradeAuthorityChange}
+          placeholder="Paste Squads upgrade authority address"
+          placeholderTextColor="#dffdf466"
+          value={squadsUpgradeAuthorityAddress || deploymentJob?.authorityWallet || ''}
+        />
+        <Text className="text-xs leading-5 text-[#dffdf4]/60">
+          The app will transfer control here when deployment finishes.
+        </Text>
+      </View>
 
       {deploymentJob ? (
         <View className="gap-2 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
@@ -2660,30 +2829,57 @@ function DeploymentCard({
           ) : null}
           {deploymentJob.authorityWallet ? (
             <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Authority: {formatShortIdentifier(deploymentJob.authorityWallet)}
+              Final authority: {formatShortIdentifier(deploymentJob.authorityWallet)}
             </Text>
+          ) : null}
+          {deploymentJob.authorityMode === 'squads_upgrade_authority' ? (
+            <Text className="text-xs leading-5 text-[#dffdf4]/70">
+              Squads validation: {getSquadsAuthorityValidationLabel(deploymentJob.squadsAuthorityValidationStatus)}
+            </Text>
+          ) : null}
+          {deploymentJob.upgradeAuthorityVerified ? (
+            <Text className="text-xs font-black leading-5 text-[#adf7e6]">Upgrade authority verified on devnet.</Text>
           ) : null}
           {deploymentJob.programId ? (
             <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
               Program id: {deploymentJob.programId}
             </Text>
           ) : null}
-          {deploymentJob.transactionSignatures.length > 0 ? (
+          {deploymentJob.paymentSignature ? (
             <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-              Signature: {formatShortIdentifier(deploymentJob.transactionSignatures[0])}
+              Payment signature: {formatShortIdentifier(deploymentJob.paymentSignature)}
+            </Text>
+          ) : null}
+          {deploymentJob.refundSignature ? (
+            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
+              Refund signature: {formatShortIdentifier(deploymentJob.refundSignature)}
             </Text>
           ) : null}
         </View>
       ) : null}
 
-      {deploymentJob?.signatureRequest ? (
+      {deploymentJob?.deploymentEstimate ? (
+        <View className="gap-2 rounded-xl border border-[#dffdf4]/14 bg-[#dffdf4]/7 p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployment prepay</Text>
+          <Text className="text-sm font-black text-[#dffdf4]">
+            Total due: {formatLamportsAsSol(deploymentJob.deploymentEstimate.totalLamports)}
+          </Text>
+          <Text className="text-xs leading-5 text-[#dffdf4]/70">
+            Includes rent, network fees, and service fee.
+          </Text>
+          <Text className="text-xs leading-5 text-[#dffdf4]/60">
+            Expires: {deploymentJob.deploymentEstimate.estimateExpiresAt}
+          </Text>
+        </View>
+      ) : null}
+
+      {deploymentJob?.paymentRequest ? (
         <View className="gap-2 rounded-xl border border-[#ffd978]/25 bg-[#ffd978]/10 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Before signing</Text>
-          <Text className="text-sm font-black leading-5 text-[#fff4cf]">{DEVNET_DEPLOYMENT_DEMO_WARNING}</Text>
-          <Text className="text-xs leading-5 text-[#fff4cf]/70">{deploymentJob.signatureRequest.summary}</Text>
-          {deploymentJob.signatureRequest.simulationSummary ? (
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Before payment</Text>
+          <Text className="text-sm font-black leading-5 text-[#fff4cf]">Approve one payment to continue deployment.</Text>
+          {deploymentJob.paymentRequest.simulationSummary ? (
             <Text className="text-xs leading-5 text-[#fff4cf]/70">
-              Simulation: {deploymentJob.signatureRequest.simulationSummary}
+              Estimate: {deploymentJob.paymentRequest.simulationSummary}
             </Text>
           ) : null}
         </View>
@@ -2695,17 +2891,23 @@ function DeploymentCard({
         </Text>
       ) : null}
 
+      {deploymentFailureMessage ? (
+        <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
+          {deploymentFailureMessage}
+        </Text>
+      ) : null}
+
       <View className="gap-2">
-        {hasSignatureRequest ? (
+        {hasPaymentRequest ? (
           <Pressable
-            accessibilityLabel="Sign devnet deployment transaction"
+            accessibilityLabel="Pay devnet deployment estimate"
             accessibilityRole="button"
             disabled={isSigningDeployment}
             onPress={onSign}
             className={`items-center rounded-full px-4 py-3 ${isSigningDeployment ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
           >
             <Text className="text-sm font-black text-[#201626]">
-              {isSigningDeployment ? 'Opening wallet...' : 'Sign devnet transaction'}
+              {isSigningDeployment ? 'Opening wallet...' : 'Pay and deploy'}
             </Text>
           </Pressable>
         ) : (

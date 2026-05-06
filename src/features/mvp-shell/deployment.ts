@@ -40,7 +40,7 @@ export async function submitDevnetDeploymentJob({
     },
     body: JSON.stringify({
       artifact_id: artifact.artifactId,
-      authority_mode: 'user_wallet_demo_authority',
+      authority_mode: 'squads_upgrade_authority',
       authority_wallet: authorityWallet,
       cluster: 'devnet',
       payer_wallet: payerWallet,
@@ -48,12 +48,16 @@ export async function submitDevnetDeploymentJob({
     }),
   })
 
-  const payload = (await response.json()) as BackendDeploymentJob | BackendErrorResponse
+  const payload = await readBackendResponsePayload(response)
 
   if (!response.ok) {
     throw new Error(
       readBackendErrorMessage(payload, 'Devnet deployment request failed. Try again when the backend is available.'),
     )
+  }
+
+  if (!isBackendDeploymentJob(payload)) {
+    throw new Error('Backend returned an invalid deployment response for devnet job submission.')
   }
 
   return normalizeDeploymentJob(payload as BackendDeploymentJob)
@@ -78,9 +82,12 @@ export async function readDeploymentJobStatus({
       createRefreshTimeout(timeoutMs),
     ])) as Response
 
-    const payload = (await response.json()) as BackendDeploymentJob | BackendErrorResponse
+    const payload = await readBackendResponsePayload(response)
 
     if (!response.ok) {
+      return buildUnavailableJob(job, nowIso)
+    }
+    if (!isBackendDeploymentJob(payload)) {
       return buildUnavailableJob(job, nowIso)
     }
 
@@ -90,32 +97,35 @@ export async function readDeploymentJobStatus({
   }
 }
 
-export async function submitDeploymentSignature({
+export async function submitDeploymentPayment({
   backendBaseUrl,
   job,
-  signatureBase64,
+  paymentSignatureBase64,
 }: {
   backendBaseUrl: string
   job: DeploymentJobRecord
-  signatureBase64: string
+  paymentSignatureBase64: string
 }): Promise<DeploymentJobRecord> {
-  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/jobs/${job.jobId}/deployment-signature`, {
+  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/jobs/${job.jobId}/deployment-payment`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      signature_base64: signatureBase64,
-      signature_request_id: job.signatureRequest?.requestId ?? null,
+      payment_request_id: job.paymentRequest?.requestId ?? null,
+      payment_signature_base64: paymentSignatureBase64,
     }),
   })
 
-  const payload = (await response.json()) as BackendDeploymentJob | BackendErrorResponse
+  const payload = await readBackendResponsePayload(response)
 
   if (!response.ok) {
     throw new Error(
-      readBackendErrorMessage(payload, 'Deployment signature submission failed. Try again after refreshing status.'),
+      readBackendErrorMessage(payload, 'Deployment payment submission failed. Try again after refreshing status.'),
     )
+  }
+  if (!isBackendDeploymentJob(payload)) {
+    throw new Error('Backend returned an invalid deployment response after payment submission.')
   }
 
   return normalizeDeploymentJob(payload as BackendDeploymentJob)
@@ -156,6 +166,45 @@ function decodeBase64Bytes(value: string): Uint8Array {
   }
 
   throw new Error('Base64 decoding is unavailable in this runtime.')
+}
+
+function readBackendResponsePayload(
+  response: Response,
+): Promise<BackendDeploymentJob | BackendErrorResponse> {
+  if (typeof (response as Response & { text?: () => Promise<string> }).text === 'function') {
+    return response
+      .text()
+      .then((rawText) => parseBackendPayload(rawText, response.status))
+      .catch(() => ({ detail: 'Backend did not return a JSON response.' }))
+  }
+
+  return (response.json() as Promise<BackendDeploymentJob | BackendErrorResponse>).catch(() => ({
+    detail: 'Backend did not return a JSON response.',
+  }))
+}
+
+function parseBackendPayload(
+  text: string,
+  statusCode: number,
+): BackendDeploymentJob | BackendErrorResponse {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return { detail: `Empty response from backend (HTTP ${statusCode}).` }
+  }
+
+  try {
+    return JSON.parse(trimmed) as BackendDeploymentJob | BackendErrorResponse
+  } catch {
+    return { detail: `Backend returned a non-JSON response (HTTP ${statusCode}).` }
+  }
+}
+
+function isBackendDeploymentJob(payload: BackendDeploymentJob | BackendErrorResponse): payload is BackendDeploymentJob {
+  return (
+    typeof (payload as BackendDeploymentJob).job_id === 'string' &&
+    typeof (payload as BackendDeploymentJob).status === 'string' &&
+    typeof (payload as BackendDeploymentJob).status_url === 'string'
+  )
 }
 
 function readBackendErrorMessage(payload: BackendDeploymentJob | BackendErrorResponse, fallback: string) {
