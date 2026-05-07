@@ -44,6 +44,7 @@ import {
   approveProjectVerificationProperties,
   applyVibeDefaultsToProject,
   capturePromptToProject,
+  listPublishedProjectSnapshots,
   listProjects,
   listProjectSummaries,
   publishProject,
@@ -80,6 +81,13 @@ type DesignDocSectionKey = 'title' | 'goal' | 'coreRequirements' | 'assumptions'
 type DesignDocScrollTarget = DesignDocSectionKey | 'approval'
 type PendingRouteConfirmation = Extract<ChatProjectRouteDecision, { kind: 'confirm' }> & {
   prompt: string
+}
+type PublishedExploreProject = {
+  projectId: string
+  title: string
+  summary: string | null
+  publishedAt: string
+  verificationProperties: VerificationProperty[]
 }
 const GENERATION_FRAMEWORK_OPTIONS: GenerationFramework[] = ['Anchor', 'Quasar', 'Pinocchio']
 type AppSettings = {
@@ -141,6 +149,32 @@ function areDesignDocsEqual(left: MvpDesignDoc | null, right: MvpDesignDoc | nul
   )
 }
 
+function toPublishedExploreProject(snapshot: ProjectSnapshot): PublishedExploreProject | null {
+  const publishedAt = snapshot.state.publishedAt
+  if (!publishedAt) {
+    return null
+  }
+
+  return {
+    projectId: snapshot.projectId,
+    title: snapshot.state.designDoc?.title ?? snapshot.projectTitle,
+    summary: snapshot.state.designDoc?.goal ?? null,
+    publishedAt,
+    verificationProperties: snapshot.state.verificationProperties,
+  }
+}
+
+function mergePublishedExploreProjects(
+  projects: PublishedExploreProject[],
+  project: PublishedExploreProject | null,
+): PublishedExploreProject[] {
+  if (!project) {
+    return projects
+  }
+
+  return [project, ...projects.filter((candidate) => candidate.projectId !== project.projectId)]
+}
+
 export function SpecDrivenApp() {
   const { account, connect, disconnect, signAndSendTransaction } = useMobileWallet()
   const [activeTab, setActiveTab] = useState<PrimaryTab>('chat')
@@ -154,6 +188,7 @@ export function SpecDrivenApp() {
   const [followUpNote, setFollowUpNote] = useState('')
   const [pendingRouteConfirmation, setPendingRouteConfirmation] = useState<PendingRouteConfirmation | null>(null)
   const [exploreTab, setExploreTab] = useState<ExploreTab>('projects')
+  const [publishedProjects, setPublishedProjects] = useState<PublishedExploreProject[]>([])
   const [walletError, setWalletError] = useState<string | null>(null)
   const [deploymentError, setDeploymentError] = useState<string | null>(null)
   const [squadsUpgradeAuthorityAddress, setSquadsUpgradeAuthorityAddress] = useState('')
@@ -190,6 +225,40 @@ export function SpecDrivenApp() {
   const visibleSuggestions = mvpState.suggestions.slice(normalizedSuggestionPage * 2, normalizedSuggestionPage * 2 + 2)
   const displayMode = toDisplayWorkflowMode(mvpState.workflowMode)
   const screenKey = `${activeTab}-${selectedSuggestion ? selectedSuggestion.id : 'main'}-${exploreTab}`
+  const localPublishedProject =
+    activeProjectId && mvpState.publishedAt
+      ? mergePublishedExploreProjects([], {
+          projectId: activeProjectId,
+          title: mvpState.designDoc?.title ?? 'Published project',
+          summary: mvpState.designDoc?.goal ?? null,
+          publishedAt: mvpState.publishedAt,
+          verificationProperties: mvpState.verificationProperties,
+        })[0]
+      : null
+  const visiblePublishedProjects = mergePublishedExploreProjects(publishedProjects, localPublishedProject)
+
+  const refreshPublishedProjects = useCallback(async () => {
+    try {
+      const snapshots = await listPublishedProjectSnapshots({
+        backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+      })
+      setPublishedProjects(
+        snapshots
+          .map(toPublishedExploreProject)
+          .filter((project): project is PublishedExploreProject => project !== null),
+      )
+    } catch {
+      // Keep the last visible feed when the local backend is unavailable.
+    }
+  }, [])
+
+  function rememberPublishedProject(snapshot: ProjectSnapshot) {
+    const project = toPublishedExploreProject(snapshot)
+    if (!project) {
+      return
+    }
+    setPublishedProjects((currentProjects) => mergePublishedExploreProjects(currentProjects, project))
+  }
 
   function applyBackendSnapshot(snapshot: ProjectSnapshot, mode: 'replace' | 'merge' = 'replace') {
     skipNextDesignDocAutosave.current = true
@@ -200,6 +269,7 @@ export function SpecDrivenApp() {
       setMvpState(snapshot.state)
     }
     setActiveProjectId(snapshot.projectId)
+    rememberPublishedProject(snapshot)
   }
 
   useEffect(() => {
@@ -301,6 +371,14 @@ export function SpecDrivenApp() {
       isCancelled = true
     }
   }, [activeProjectId, hasLoadedMvpState])
+
+  useEffect(() => {
+    if (!hasLoadedMvpState || activeTab !== 'explore') {
+      return
+    }
+
+    void refreshPublishedProjects()
+  }, [activeTab, hasLoadedMvpState, refreshPublishedProjects])
 
   useEffect(() => {
     if (!hasLoadedMvpState || !activeProjectId || !mvpState.designDoc) {
@@ -547,6 +625,8 @@ export function SpecDrivenApp() {
         projectId: activeProjectId,
       })
       applyBackendSnapshot(snapshot)
+      setExploreTab('projects')
+      setActiveTab('explore')
     } catch {
       // publish errors are non-critical; surface via the card state (publishedAt stays null)
     } finally {
@@ -1115,10 +1195,7 @@ export function SpecDrivenApp() {
                 <ExploreView
                   exploreTab={exploreTab}
                   onExploreTabChange={setExploreTab}
-                  projectTitle={mvpState.designDoc?.title ?? null}
-                  projectSummary={mvpState.designDoc?.goal ?? null}
-                  publishedAt={mvpState.publishedAt}
-                  verificationProperties={mvpState.verificationProperties}
+                  publishedProjects={visiblePublishedProjects}
                 />
               ) : null}
             </ScrollView>
@@ -3016,18 +3093,20 @@ function EditableSettingRow({
 function ExploreView({
   exploreTab,
   onExploreTabChange,
-  projectTitle,
-  projectSummary,
-  publishedAt,
-  verificationProperties,
+  publishedProjects,
 }: {
   exploreTab: ExploreTab
   onExploreTabChange: (tab: ExploreTab) => void
-  projectTitle: string | null
-  projectSummary: string | null
-  publishedAt: string | null
-  verificationProperties: VerificationProperty[]
+  publishedProjects: PublishedExploreProject[]
 }) {
+  const publishedProperties = publishedProjects.flatMap((project) =>
+    project.verificationProperties.map((property) => ({
+      ...property,
+      projectId: project.projectId,
+      projectTitle: project.title,
+    })),
+  )
+
   return (
     <View className="gap-4">
       <View className="flex-row items-start justify-between gap-3">
@@ -3057,22 +3136,34 @@ function ExploreView({
 
       {exploreTab === 'projects' ? (
         <View className="gap-3">
-          <SectionTitle title="Published projects" badge={publishedAt ? '1 project' : 'None yet'} />
-          {publishedAt && projectTitle ? (
-            <View className="flex-row items-center gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
-              <View className="h-14 w-11 rounded-lg border border-[#75e6be]/25 bg-[#75e6be]/20" />
-              <View className="min-w-0 flex-1">
-                <Text className="text-base font-black text-[#fff4cf]">{projectTitle}</Text>
-                {projectSummary ? (
-                  <Text className="text-sm leading-5 text-[#fff4cf]/65" numberOfLines={2}>
-                    {projectSummary}
-                  </Text>
-                ) : null}
+          <SectionTitle
+            title="Published projects"
+            badge={
+              publishedProjects.length > 0
+                ? `${publishedProjects.length} project${publishedProjects.length === 1 ? '' : 's'}`
+                : 'None yet'
+            }
+          />
+          {publishedProjects.length > 0 ? (
+            publishedProjects.map((project) => (
+              <View
+                key={project.projectId}
+                className="flex-row items-center gap-3 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3"
+              >
+                <View className="h-14 w-11 rounded-lg border border-[#75e6be]/25 bg-[#75e6be]/20" />
+                <View className="min-w-0 flex-1">
+                  <Text className="text-base font-black text-[#fff4cf]">{project.title}</Text>
+                  {project.summary ? (
+                    <Text className="text-sm leading-5 text-[#fff4cf]/65" numberOfLines={2}>
+                      {project.summary}
+                    </Text>
+                  ) : null}
+                </View>
+                <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
+                  <Text className="text-xs font-black text-[#adf7e6]">Published</Text>
+                </View>
               </View>
-              <View className="rounded-full bg-[#75e6be]/15 px-3 py-2">
-                <Text className="text-xs font-black text-[#adf7e6]">Published</Text>
-              </View>
-            </View>
+            ))
           ) : (
             <View className="gap-2 rounded-lg border border-[#fff4cf]/10 bg-[#fff4cf]/5 p-4">
               <Text className="text-base font-black text-[#fff4cf]">No published projects yet</Text>
@@ -3088,17 +3179,23 @@ function ExploreView({
         <View className="gap-3">
           <SectionTitle
             title="Published properties"
-            badge={publishedAt && verificationProperties.length > 0 ? `${verificationProperties.length}` : 'None yet'}
+            badge={publishedProperties.length > 0 ? `${publishedProperties.length}` : 'None yet'}
           />
-          {publishedAt && verificationProperties.length > 0 ? (
-            verificationProperties.map((property) => (
-              <View key={property.id} className="gap-1 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
+          {publishedProperties.length > 0 ? (
+            publishedProperties.map((property) => (
+              <View
+                key={`${property.projectId}-${property.id}`}
+                className="gap-1 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3"
+              >
                 <View className="flex-row items-center justify-between gap-3">
                   <Text className="text-sm font-black text-[#fff4cf]">{property.label}</Text>
                   <View className="rounded-full bg-[#ffd978]/15 px-3 py-1">
                     <Text className="text-[10px] font-black text-[#ffe6a3]">Property</Text>
                   </View>
                 </View>
+                <Text className="text-[11px] font-black uppercase tracking-widest text-[#ffe6a3]/70">
+                  {property.projectTitle}
+                </Text>
                 <Text className="text-sm leading-5 text-[#fff4cf]/65">{property.statement}</Text>
               </View>
             ))

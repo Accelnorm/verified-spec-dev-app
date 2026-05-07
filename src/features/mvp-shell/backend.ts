@@ -187,6 +187,7 @@ export type ProjectSnapshot = {
 export type ProjectSummary = ProjectRouteSummary & {
   workflowMode: WorkflowMode
   updatedAt: string
+  publishedAt: string | null
 }
 
 export async function listProjects(backendBaseUrl: string): Promise<string[]> {
@@ -205,7 +206,23 @@ export async function listProjectSummaries(backendBaseUrl: string): Promise<Proj
     title: project.title,
     workflowMode: normalizeWorkflowMode(project.workflow_mode),
     updatedAt: project.updated_at,
+    publishedAt: project.published_at ?? null,
   }))
+}
+
+export async function listPublishedProjectSnapshots({
+  backendBaseUrl,
+  limit = 20,
+}: {
+  backendBaseUrl: string
+  limit?: number
+}): Promise<ProjectSnapshot[]> {
+  const summaries = await listProjectSummaries(backendBaseUrl)
+  const publishedSummaries = summaries.filter((project) => project.publishedAt).slice(0, limit)
+  const snapshots = await Promise.all(
+    publishedSummaries.map((project) => readProjectSnapshot({ backendBaseUrl, projectId: project.projectId })),
+  )
+  return snapshots.filter((snapshot) => snapshot.state.publishedAt)
 }
 
 export async function readProjectSnapshot({

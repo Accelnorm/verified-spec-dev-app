@@ -6,6 +6,7 @@ const {
   approveProjectVerificationProperties,
   applyVibeDefaultsToProject,
   capturePromptToProject,
+  listPublishedProjectSnapshots,
   listProjectSummaries,
   saveDesignDocToProject,
   sendProjectChatMessage,
@@ -18,6 +19,7 @@ function projectSnapshotPayload() {
       project_id: 'proj_chat',
       title: 'Marketplace MVP',
       workflow_mode: 'vibe_coding',
+      published_at: null,
       created_at: '2026-05-06T01:00:00Z',
       updated_at: '2026-05-06T01:10:00Z',
     },
@@ -214,6 +216,7 @@ test('listProjectSummaries returns route-ready project titles and ids', async ()
               project_id: 'proj_chat',
               title: 'Marketplace MVP',
               workflow_mode: 'vibe_coding',
+              published_at: null,
               created_at: '2026-05-06T01:00:00Z',
               updated_at: '2026-05-06T01:10:00Z',
             },
@@ -231,8 +234,74 @@ test('listProjectSummaries returns route-ready project titles and ids', async ()
       title: 'Marketplace MVP',
       workflowMode: 'vibe_coding',
       updatedAt: '2026-05-06T01:10:00Z',
+      publishedAt: null,
     },
   ])
+})
+
+test('listPublishedProjectSnapshots ignores newer unpublished projects and reads published snapshots', async () => {
+  const fetchCalls = []
+  global.fetch = async (url, options) => {
+    fetchCalls.push({ url, options })
+    if (url.endsWith('/projects')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            projects: [
+              {
+                project_id: 'proj_new_unpublished',
+                title: 'New unpublished MVP',
+                workflow_mode: 'vibe_coding',
+                published_at: null,
+                created_at: '2026-05-06T01:20:00Z',
+                updated_at: '2026-05-06T01:20:00Z',
+              },
+              {
+                project_id: 'proj_published',
+                title: 'Published attestation MVP',
+                workflow_mode: 'professional_development',
+                published_at: '2026-05-06T01:19:00Z',
+                created_at: '2026-05-06T01:00:00Z',
+                updated_at: '2026-05-06T01:19:00Z',
+              },
+            ],
+          }
+        },
+      }
+    }
+
+    assert.equal(url, 'http://127.0.0.1:8000/projects/proj_published')
+    const payload = projectSnapshotPayload()
+    payload.project.project_id = 'proj_published'
+    payload.project.title = 'Published attestation MVP'
+    payload.project.workflow_mode = 'professional_development'
+    payload.project.published_at = '2026-05-06T01:19:00Z'
+    payload.published_at = '2026-05-06T01:19:00Z'
+    payload.design_doc.project_id = 'proj_published'
+    payload.design_doc.title = 'Published attestation MVP'
+    payload.design_doc.goal = 'Show the published project in Exploration.'
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return payload
+      },
+    }
+  }
+
+  const snapshots = await listPublishedProjectSnapshots({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+  })
+
+  assert.equal(fetchCalls.length, 2)
+  assert.equal(snapshots.length, 1)
+  assert.equal(snapshots[0].projectId, 'proj_published')
+  assert.equal(snapshots[0].projectTitle, 'Published attestation MVP')
+  assert.equal(snapshots[0].workflowMode, 'professional_development')
+  assert.equal(snapshots[0].state.publishedAt, '2026-05-06T01:19:00Z')
+  assert.equal(snapshots[0].state.designDoc.title, 'Published attestation MVP')
 })
 
 test('updateProjectWorkflowMode persists explicit mode changes through backend API', async () => {
