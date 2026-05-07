@@ -11,8 +11,10 @@ export type MvpProjectSeed = {
 }
 
 export type WorkflowMode = 'vibe_coding' | 'professional_development'
+export type GenerationFramework = 'Anchor' | 'Quasar' | 'Pinocchio'
 
 export const DEFAULT_WORKFLOW_MODE: WorkflowMode = 'vibe_coding'
+export const DEFAULT_GENERATION_FRAMEWORK: GenerationFramework = 'Anchor'
 
 export type ProjectRouteSummary = {
   projectId: string
@@ -147,6 +149,7 @@ export type DeploymentJobRecord = {
 
 export type MvpShellState = {
   workflowMode: WorkflowMode
+  generationFramework: GenerationFramework
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
@@ -164,6 +167,7 @@ export type MvpShellState = {
 
 type StoredMvpShellState = {
   workflowMode?: WorkflowMode
+  generationFramework?: GenerationFramework
   messages: ChatMessage[]
   latestPromptSeed: MvpProjectSeed | null
   designDoc: MvpDesignDoc | null
@@ -183,6 +187,7 @@ export type GenerationJobRequest = {
   title: string
   workflow_mode: string
   project_type: string
+  framework: GenerationFramework
   design_doc: string
   cvlr_specs_ready?: boolean
 }
@@ -195,6 +200,7 @@ export const MVP_CAPTURE_ACK = 'Project request captured. Review the Design Doc 
 export function createInitialMvpShellState(): MvpShellState {
   return {
     workflowMode: DEFAULT_WORKFLOW_MODE,
+    generationFramework: DEFAULT_GENERATION_FRAMEWORK,
     messages: [
       {
         id: 'welcome-1',
@@ -217,10 +223,14 @@ export function createInitialMvpShellState(): MvpShellState {
   }
 }
 
-export function createClearedChatState(workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE): MvpShellState {
+export function createClearedChatState(
+  workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE,
+  generationFramework: GenerationFramework = DEFAULT_GENERATION_FRAMEWORK,
+): MvpShellState {
   return {
     ...createInitialMvpShellState(),
     workflowMode,
+    generationFramework,
   }
 }
 
@@ -288,6 +298,7 @@ export function submitPrompt(
       },
     ],
     workflowMode: state.workflowMode,
+    generationFramework: state.generationFramework,
     latestPromptSeed: {
       prompt,
       updatedAt: nowIso,
@@ -315,6 +326,7 @@ export function buildGenerationRequest(state: MvpShellState): GenerationJobReque
     title: state.designDoc.title,
     workflow_mode: state.workflowMode,
     project_type: 'solana_mobile_app',
+    framework: state.generationFramework,
     design_doc: renderDesignDocMarkdown(state.designDoc),
     ...(state.cvlrSpec ? { cvlr_specs_ready: true } : {}),
   }
@@ -327,9 +339,16 @@ export function updateWorkflowMode(state: MvpShellState, workflowMode: WorkflowM
   }
 }
 
+export function updateGenerationFramework(state: MvpShellState, generationFramework: GenerationFramework): MvpShellState {
+  return {
+    ...state,
+    generationFramework,
+  }
+}
+
 export function getGenerationBlocker(state: MvpShellState): string | null {
   if (!state.designDoc) {
-    return 'Create or restore an MVP Design Doc before generation can start.'
+    return 'Create or restore a Design Doc before generation can start.'
   }
   if (state.designDoc.missingInformation.length > 0) {
     if (state.workflowMode === 'vibe_coding') {
@@ -341,7 +360,7 @@ export function getGenerationBlocker(state: MvpShellState): string | null {
     return 'Approve the Design Doc in Workspace before generation.'
   }
   if (state.verificationProperties.length === 0 || !state.verificationPropertiesApprovedAt) {
-    return 'Review and approve the properties to prove before generation.'
+    return 'Review and approve the properties to hold before generation.'
   }
   if (!state.cvlrSpec) {
     return 'Generate CVLR specs from the approved properties before generation.'
@@ -454,11 +473,7 @@ export function getDeployableGenerationArtifact(job: GenerationJobRecord | null)
     return null
   }
 
-  return (
-    job?.artifacts.find((artifact) => getGenerationArtifactDeploymentKind(artifact) === 'program_binary') ??
-    job?.artifacts.find((artifact) => getGenerationArtifactDeploymentKind(artifact) === 'cargo_project_source') ??
-    null
-  )
+  return job?.artifacts.find((artifact) => getGenerationArtifactDeploymentKind(artifact) === 'program_binary') ?? null
 }
 
 export function getGenerationArtifactDeploymentKind(
@@ -489,7 +504,7 @@ export function getDevnetDeploymentBlocker(
   squadsUpgradeAuthorityAddress = '',
 ): string | null {
   if (!getDeployableGenerationArtifact(state.generationJob)) {
-    return 'Generate a Solana program binary or buildable Cargo project before devnet deployment.'
+    return 'Build a Solana program binary before devnet deployment.'
   }
   if (!walletConnected) {
     return 'Connect a wallet before devnet deployment.'
@@ -606,6 +621,7 @@ export function updateDesignDocListField(
 export function serializeMvpShellState(state: MvpShellState): string {
   const snapshot: StoredMvpShellState = {
     workflowMode: state.workflowMode,
+    generationFramework: state.generationFramework,
     messages: state.messages,
     latestPromptSeed: state.latestPromptSeed,
     designDoc: state.designDoc,
@@ -692,6 +708,7 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
 
     return {
       workflowMode: normalizeWorkflowMode(parsed.workflowMode),
+      generationFramework: normalizeGenerationFramework(parsed.generationFramework),
       messages: parsed.messages,
       latestPromptSeed: parsed.latestPromptSeed ?? null,
       designDoc:
@@ -717,12 +734,15 @@ export function restoreMvpShellState(serialized: string | null | undefined): Mvp
   }
 }
 
-export function mergeBackendProjectState(backendState: MvpShellState, _localState: MvpShellState): MvpShellState {
-  return backendState
+export function mergeBackendProjectState(backendState: MvpShellState, localState: MvpShellState): MvpShellState {
+  return {
+    ...backendState,
+    generationFramework: localState.generationFramework,
+  }
 }
 
 export function renderDesignDocMarkdown(designDoc: MvpDesignDoc): string {
-  return [
+  const lines = [
     `# ${designDoc.title}`,
     '',
     '## Goal',
@@ -733,30 +753,33 @@ export function renderDesignDocMarkdown(designDoc: MvpDesignDoc): string {
     '',
     '## Assumptions',
     ...renderBulletList(designDoc.assumptions),
-    '',
-    '## Missing information',
-    ...renderBulletList(designDoc.missingInformation),
-  ].join('\n')
+  ]
+
+  if (designDoc.missingInformation.length > 0) {
+    lines.push('', '## Missing information', ...renderBulletList(designDoc.missingInformation))
+  }
+
+  return lines.join('\n')
 }
 
 function createDesignDocFromPrompt(prompt: string, nowIso: string): MvpDesignDoc {
   const subject = extractPromptSubject(prompt)
-  const title = /\bmvp$/i.test(subject) ? subject : `${subject} MVP`
+  const title = subject
 
   return {
     title,
-    goal: `Deliver ${subject.toLowerCase()} through a hackathon-ready MVP flow before generation starts.`,
+    goal: `Deliver ${subject.toLowerCase()} before generation starts.`,
     coreRequirements: [
       'Capture the user prompt as the project seed and keep it visible during review.',
-      `Turn ${subject.toLowerCase()} into one editable MVP Design Doc with clear requirements.`,
+      `Turn ${subject.toLowerCase()} into one editable Design Doc with clear requirements.`,
       'Keep the Design Doc ready for a later backend generation submission without requiring extra setup.',
     ],
     assumptions: [
-      'The first generated Design Doc is a concise MVP draft that the user can refine in-app.',
+      'The first generated Design Doc is concise and user-editable.',
       'Generation, verification, and deployment stay outside this review step until the backend contract is available.',
     ],
     missingInformation: [
-      'Success criteria or acceptance checks that define a finished MVP outcome.',
+      'Success criteria or acceptance checks that define a finished outcome.',
       'Any integration, wallet, or backend constraints that must shape generation later.',
     ],
     updatedAt: nowIso,
@@ -770,7 +793,7 @@ function extractPromptSubject(prompt: string): string {
   const withoutArticle = truncated.replace(/^(a|an|the)\s+/i, '').replace(/[.!?;:]+$/g, '')
 
   if (!withoutArticle) {
-    return 'MVP design doc'
+    return 'Design Doc'
   }
 
   return withoutArticle.charAt(0).toUpperCase() + withoutArticle.slice(1)
@@ -831,6 +854,13 @@ function normalizeWorkflowMode(value: unknown): WorkflowMode {
     return 'professional_development'
   }
   return DEFAULT_WORKFLOW_MODE
+}
+
+function normalizeGenerationFramework(value: unknown): GenerationFramework {
+  if (value === 'Quasar' || value === 'Pinocchio') {
+    return value
+  }
+  return DEFAULT_GENERATION_FRAMEWORK
 }
 
 function isDesignDoc(value: unknown): value is MvpDesignDoc {

@@ -150,7 +150,7 @@ test('generation readiness is based on backend-restored properties and approval 
   assert.equal(designApprovedState.verificationProperties.length, 1)
   assert.equal(
     getGenerationBlocker(designApprovedState),
-    'Review and approve the properties to prove before generation.',
+    'Review and approve the properties to hold before generation.',
   )
 
   const propertiesApprovedState = {
@@ -316,7 +316,7 @@ test('a later prompt replaces the seed so it survives navigation as the current 
   assert.equal(secondState.messages.at(-2)?.text, 'Second prompt for the actual MVP')
 })
 
-test('submitPrompt provisions one editable MVP design doc from the latest prompt seed', () => {
+test('submitPrompt provisions one editable Design Doc from the latest prompt seed', () => {
   const nextState = submitPrompt(
     createInitialMvpShellState(),
     'Build a mobile escrow app that turns chat prompts into hackathon-ready design docs with clear generation steps.',
@@ -327,8 +327,8 @@ test('submitPrompt provisions one editable MVP design doc from the latest prompt
     '2026-05-06T00:30:00Z',
   )
 
-  assert.equal(nextState.designDoc?.title, 'Mobile escrow app MVP')
-  assert.match(nextState.designDoc?.goal ?? '', /hackathon/i)
+  assert.equal(nextState.designDoc?.title, 'Mobile escrow app')
+  assert.match(nextState.designDoc?.goal ?? '', /before generation/i)
   assert.equal(nextState.designDoc?.coreRequirements.length, 3)
   assert.equal(nextState.designDoc?.assumptions.length, 2)
   assert.equal(nextState.designDoc?.missingInformation.length, 2)
@@ -346,16 +346,16 @@ test('updateDesignDocField keeps user edits across serialization and restore', (
       '2026-05-06T00:30:00Z',
     ),
     'goal',
-    'Deliver one editable MVP design doc before generation starts.',
+    'Deliver one editable Design Doc before generation starts.',
   )
 
   const restoredState = restoreMvpShellState(serializeMvpShellState(savedState))
 
-  assert.equal(restoredState?.designDoc?.goal, 'Deliver one editable MVP design doc before generation starts.')
-  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
+  assert.equal(restoredState?.designDoc?.goal, 'Deliver one editable Design Doc before generation starts.')
+  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app')
 })
 
-test('restoreMvpShellState backfills one MVP design doc for legacy saved prompt-only state', () => {
+test('restoreMvpShellState backfills one Design Doc for legacy saved prompt-only state', () => {
   const restoredState = restoreMvpShellState(
     JSON.stringify({
       messages: [
@@ -369,8 +369,8 @@ test('restoreMvpShellState backfills one MVP design doc for legacy saved prompt-
     }),
   )
 
-  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app MVP')
-  assert.match(restoredState?.designDoc?.goal ?? '', /hackathon-ready/i)
+  assert.equal(restoredState?.designDoc?.title, 'Mobile escrow app')
+  assert.match(restoredState?.designDoc?.goal ?? '', /before generation/i)
   assert.deepEqual(restoredState?.suggestions, [])
   assert.equal(restoredState?.workflowMode, 'vibe_coding')
 })
@@ -552,10 +552,10 @@ test('getGenerationResultIssue prefers the backend failure message when generati
   )
 })
 
-test('devnet deployment is gated on a deployable artifact and connected wallet', () => {
+test('devnet deployment is gated on a program binary and connected wallet', () => {
   const emptyState = createInitialMvpShellState()
 
-  assert.match(getDevnetDeploymentBlocker(emptyState, true), /Generate a Solana program binary/)
+  assert.match(getDevnetDeploymentBlocker(emptyState, true), /Build a Solana program binary/)
 
   const generatedState = saveGenerationJob(emptyState, {
     jobId: 'gen_succeeded',
@@ -618,11 +618,12 @@ test('devnet deployment is gated on a deployable artifact and connected wallet',
     modelLabel: null,
   })
 
-  assert.equal(getDeployableGenerationArtifact(buildSourceState.generationJob)?.artifactId, 'artifact_1')
+  assert.equal(getDeployableGenerationArtifact(buildSourceState.generationJob), null)
   assert.equal(
-    getGenerationArtifactDeploymentKind(getDeployableGenerationArtifact(buildSourceState.generationJob)),
+    getGenerationArtifactDeploymentKind(buildSourceState.generationJob?.artifacts[0]),
     'cargo_project_source',
   )
+  assert.match(getDevnetDeploymentBlocker(buildSourceState, true), /Build a Solana program binary/)
 
   const sourceOnlyState = saveGenerationJob(emptyState, {
     jobId: 'gen_source_only_succeeded',
@@ -646,7 +647,7 @@ test('devnet deployment is gated on a deployable artifact and connected wallet',
   })
 
   assert.equal(getDeployableGenerationArtifact(sourceOnlyState.generationJob), null)
-  assert.match(getDevnetDeploymentBlocker(sourceOnlyState, true), /Generate a Solana program binary/)
+  assert.match(getDevnetDeploymentBlocker(sourceOnlyState, true), /Build a Solana program binary/)
 })
 
 test('deployment jobs survive serialization with payment request metadata', () => {

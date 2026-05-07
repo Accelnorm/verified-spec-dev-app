@@ -11,11 +11,9 @@ import {
   getDeployableGenerationArtifact,
   getDeploymentStatusLabel,
   getDevnetDeploymentBlocker,
-  getGenerationArtifactDeploymentKind,
   getGenerationBlocker,
   getGenerationResultIssue,
   getGenerationStatusLabel,
-  hasRenderableGenerationResult,
   isActiveDeploymentJob,
   mergeBackendProjectState,
   restoreMvpShellState,
@@ -24,11 +22,12 @@ import {
   saveCvlrSpec,
   serializeMvpShellState,
   submitPrompt,
+  updateGenerationFramework,
   type ChatProjectRouteDecision,
   type CvlrSpec,
   type DeploymentJobRecord,
-  type GenerationArtifactRecord,
   type ChatMessage,
+  type GenerationFramework,
   type GenerationJobRecord,
   type MvpDesignDoc,
   type MvpProjectSeed,
@@ -81,6 +80,7 @@ type DesignDocScrollTarget = DesignDocSectionKey | 'approval'
 type PendingRouteConfirmation = Extract<ChatProjectRouteDecision, { kind: 'confirm' }> & {
   prompt: string
 }
+const GENERATION_FRAMEWORK_OPTIONS: GenerationFramework[] = ['Anchor', 'Quasar', 'Pinocchio']
 type AppSettings = {
   certoraApiKey: string
   easAuth: string
@@ -417,7 +417,7 @@ export function SpecDrivenApp() {
   function handleClearChat() {
     skipAutoProjectHydrate.current = true
     setActiveProjectId(null)
-    setMvpState((currentState) => createClearedChatState(currentState.workflowMode))
+    setMvpState((currentState) => createClearedChatState(currentState.workflowMode, currentState.generationFramework))
     setDraft('')
     setFollowUpDraft('')
     setFollowUpNote('')
@@ -461,6 +461,10 @@ export function SpecDrivenApp() {
     } catch {
       setGenerationError('Workflow mode is saved locally. Backend mode save is unavailable right now.')
     }
+  }
+
+  function handleGenerationFrameworkChange(nextFramework: GenerationFramework) {
+    setMvpState((currentState) => updateGenerationFramework(currentState, nextFramework))
   }
 
   async function handleApplyVibeDefaults() {
@@ -526,7 +530,7 @@ export function SpecDrivenApp() {
   }
 
   function handleSuggestProperty(text: string) {
-    setDraft(`I want to add this invariant to my program: ${text.trim()}`)
+    setDraft(`I want to add this property to hold: ${text.trim()}`)
     setActiveTab('chat')
   }
 
@@ -717,7 +721,7 @@ export function SpecDrivenApp() {
     setGenerationError(null)
 
     if (!activeProjectId) {
-      setGenerationError('Submit the project prompt in Chat before approving properties to prove.')
+      setGenerationError('Submit the project prompt in Chat before approving properties to hold.')
       return
     }
 
@@ -739,7 +743,7 @@ export function SpecDrivenApp() {
 
     const request = buildGenerationRequest(mvpState)
     if (!request) {
-      setGenerationError('Create or restore an MVP Design Doc before generation can start.')
+      setGenerationError('Create or restore a Design Doc before generation can start.')
       return
     }
     const generationBlocker = getGenerationBlocker(mvpState)
@@ -1029,6 +1033,7 @@ export function SpecDrivenApp() {
                   verificationPropertiesApprovedAt={mvpState.verificationPropertiesApprovedAt}
                   workflowMode={mvpState.workflowMode}
                   walletConnected={Boolean(account)}
+                  generationFramework={mvpState.generationFramework}
                   generationError={generationError}
                   generationJob={mvpState.generationJob}
                   cvlrError={cvlrError}
@@ -1054,6 +1059,7 @@ export function SpecDrivenApp() {
                   onDiscussDesignDocSection={handleDiscussDesignDocSection}
                   onApproveCvlrSpec={handleApproveCvlrSpec}
                   onGenerateCvlrSpec={handleGenerateCvlrSpec}
+                  onGenerationFrameworkChange={handleGenerationFrameworkChange}
                   onGenerationSubmit={handleGenerationSubmit}
                   onGenerationRefresh={handleGenerationRefresh}
                   onDeploymentRefresh={handleDeploymentRefresh}
@@ -1105,7 +1111,7 @@ function Header({
   onWalletPress: () => void
   walletConnected: boolean
 }) {
-  const activeTitle = activeTab === 'chat' ? 'Chat' : activeTab === 'workspace' ? 'Workspace' : 'Explore'
+  const activeTitle = activeTab === 'chat' ? 'Chat' : activeTab === 'workspace' ? 'Workspace' : 'Exploration'
   const walletLabel =
     walletConnected && accountAddress
       ? `${accountAddress.slice(0, 4)}...${accountAddress.slice(-4)}`
@@ -1466,7 +1472,7 @@ function Composer({
   const canSend = Boolean(draft.trim()) && !isSending
 
   return (
-    <View className="flex-row items-end gap-2 rounded-[24px] border border-[#fff4cf]/15 bg-[#fff4cf]/10 p-1.5">
+    <View className="flex-row items-center gap-2 rounded-[24px] border border-[#fff4cf]/15 bg-[#fff4cf]/10 p-1.5">
       <Pressable
         accessibilityLabel="Voice input"
         accessibilityRole="button"
@@ -1535,6 +1541,7 @@ function WorkspaceView({
   designDocApprovedAt,
   deploymentError,
   deploymentJob,
+  generationFramework,
   generationError,
   generationJob,
   isApprovingCvlrSpec,
@@ -1567,6 +1574,7 @@ function WorkspaceView({
   onDeploymentSign,
   onDeploymentStart,
   onGenerateCvlrSpec,
+  onGenerationFrameworkChange,
   onGenerationRefresh,
   onGenerationSubmit,
   onGoToWorkspaceCard,
@@ -1585,6 +1593,7 @@ function WorkspaceView({
   designDocApprovedAt: string | null
   deploymentError: string | null
   deploymentJob: DeploymentJobRecord | null
+  generationFramework: GenerationFramework
   generationError: string | null
   generationJob: GenerationJobRecord | null
   cvlrError: string | null
@@ -1620,6 +1629,7 @@ function WorkspaceView({
   onDeploymentSign: () => void
   onDeploymentStart: () => void
   onGenerateCvlrSpec: () => void
+  onGenerationFrameworkChange: (value: GenerationFramework) => void
   onGenerationRefresh: () => void
   onGenerationSubmit: () => void
   onGoToWorkspaceCard: (target: WorkspaceCardTarget) => void
@@ -1656,6 +1666,7 @@ function WorkspaceView({
           approvedSections={approvedDesignDocSections}
           designDoc={designDoc}
           generationError={generationError}
+          generationFramework={generationFramework}
           generationJob={generationJob}
           isApplyingVibeDefaults={isApplyingVibeDefaults}
           isRefreshingGenerationStatus={isRefreshingGenerationStatus}
@@ -1669,6 +1680,7 @@ function WorkspaceView({
           onFieldChange={onDesignDocFieldChange}
           onSectionLayout={onDesignDocSectionLayout}
           onRefresh={onGenerationRefresh}
+          onFrameworkChange={onGenerationFrameworkChange}
           onGenerate={onGenerationSubmit}
           onListFieldChange={onDesignDocListFieldChange}
         />
@@ -1700,7 +1712,6 @@ function WorkspaceView({
         <>
           <View onLayout={(event) => onWorkspaceCardLayout('deployment', event.nativeEvent.layout.y)}>
             <DeploymentCard
-              accountAddress={accountAddress}
               deploymentError={deploymentError}
               deploymentJob={deploymentJob}
               generationJob={generationJob}
@@ -1729,14 +1740,14 @@ function WorkspaceView({
         >
           <View className="flex-row items-start justify-between gap-3">
             <View className="min-w-0 flex-1 gap-1">
-              <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Publish to Explore</Text>
+              <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Publish to Exploration</Text>
               <Text className="text-xl font-black leading-6 text-[#dffdf4]">
                 {publishedAt ? 'Project is published' : 'Share with the community'}
               </Text>
               <Text className="text-sm leading-5 text-[#dffdf4]/70">
                 {publishedAt
-                  ? 'Your project is now visible in Explore.'
-                  : 'Share this project in Explore.'}
+                  ? 'Your project is now visible in Exploration.'
+                  : 'Share this project in Exploration.'}
               </Text>
             </View>
             <View className={`rounded-full px-3 py-2 ${publishedAt ? 'bg-[#75e6be]/25' : 'bg-[#75e6be]/15'}`}>
@@ -1830,78 +1841,12 @@ function formatSavedAt(value: string) {
   return date.toLocaleString()
 }
 
-function getGenerationStatusBadgeClass(status: string) {
-  switch (getGenerationStatusLabel(status)) {
-    case 'Queued':
-      return 'bg-[#9db4ff]/18'
-    case 'Running':
-      return 'bg-[#ffd978]/18'
-    case 'Succeeded':
-      return 'bg-[#75e6be]/15'
-    case 'Failed':
-      return 'bg-[#ff8a5c]/18'
-    case 'Unavailable':
-    default:
-      return 'bg-[#7a8197]/25'
-  }
-}
-
-function getDeploymentStatusBadgeClass(status: string) {
-  switch (getDeploymentStatusLabel(status)) {
-    case 'Queued':
-      return 'bg-[#9db4ff]/18'
-    case 'Running':
-    case 'Verifying authority':
-    case 'Confirming payment':
-    case 'Deploying':
-      return 'bg-[#ffd978]/18'
-    case 'Signature needed':
-    case 'Payment required':
-      return 'bg-[#ffd978]/20'
-    case 'Succeeded':
-    case 'Refunded':
-      return 'bg-[#75e6be]/15'
-    case 'Failed':
-    case 'Refund pending':
-      return 'bg-[#ff8a5c]/18'
-    case 'Unavailable':
-    default:
-      return 'bg-[#7a8197]/25'
-  }
-}
-
 function isActiveGenerationJob(status: string) {
   return status === 'queued' || status === 'running'
 }
 
-function formatShortIdentifier(value: string | null | undefined) {
-  if (!value) {
-    return null
-  }
-  if (value.length <= 30) {
-    return value
-  }
-  return `${value.slice(0, 14)}...${value.slice(-10)}`
-}
-
 function formatLamportsAsSol(lamports: number) {
   return `${(lamports / 1_000_000_000).toFixed(6).replace(/0+$/, '').replace(/\.$/, '')} SOL`
-}
-
-function getSquadsAuthorityValidationLabel(status: string) {
-  switch (status) {
-    case 'valid':
-      return 'validated'
-    case 'invalid':
-      return 'invalid'
-    case 'unavailable':
-      return 'unavailable'
-    case 'not_implemented':
-      return 'not verified yet'
-    case 'not_applicable':
-    default:
-      return 'not applicable'
-  }
 }
 
 function DesignDocCard({
@@ -1909,6 +1854,7 @@ function DesignDocCard({
   approvedSections,
   designDoc,
   generationError,
+  generationFramework,
   generationJob,
   isApplyingVibeDefaults,
   isRefreshingGenerationStatus,
@@ -1920,6 +1866,7 @@ function DesignDocCard({
   onApproveSection,
   onDiscussSection,
   onFieldChange,
+  onFrameworkChange,
   onSectionLayout,
   onRefresh,
   onGenerate,
@@ -1929,6 +1876,7 @@ function DesignDocCard({
   approvedSections: DesignDocSectionKey[]
   designDoc: MvpDesignDoc | null
   generationError: string | null
+  generationFramework: GenerationFramework
   generationJob: GenerationJobRecord | null
   isApplyingVibeDefaults: boolean
   isRefreshingGenerationStatus: boolean
@@ -1940,6 +1888,7 @@ function DesignDocCard({
   onApproveSection: (sectionKey: DesignDocSectionKey) => void
   onDiscussSection: (section: { key: DesignDocSectionKey; label: string; value: string }) => void
   onFieldChange: (field: 'title' | 'goal', value: string) => void
+  onFrameworkChange: (value: GenerationFramework) => void
   onSectionLayout: (target: DesignDocScrollTarget, y: number) => void
   onRefresh: () => void
   onGenerate: () => void
@@ -1950,14 +1899,19 @@ function DesignDocCard({
   const generationBlocked = isSubmittingGeneration || hasMissingInformation || !approvedAt || !propertiesApprovedAt
   const modeLabel = toDisplayWorkflowMode(workflowMode)
   const generationButtonLabel = isSubmittingGeneration
-    ? 'Submitting to Certora Prover...'
+    ? 'Submitting to AI Composer...'
     : hasMissingInformation
       ? 'Resolve gate before generation'
       : !approvedAt
         ? 'Approve Design Doc first'
         : !propertiesApprovedAt
           ? 'Approve properties first'
-          : 'Generate MVP'
+          : 'Generate'
+  const generationLine = generationJob
+    ? generationJob.status === 'succeeded'
+      ? 'Generation successful.'
+      : `Generation ${getGenerationStatusLabel(generationJob.status).toLowerCase()}.`
+    : 'Generation ready.'
   const sections: {
     key: DesignDocSectionKey
     label: string
@@ -1993,20 +1947,31 @@ function DesignDocCard({
           value: designDoc.assumptions.join('\n'),
           onChangeText: (value) => onListFieldChange('assumptions', value),
         },
-        {
-          key: 'missingInformation',
-          label: 'Missing information',
-          multiline: true,
-          value: designDoc.missingInformation.join('\n'),
-          onChangeText: (value) => onListFieldChange('missingInformation', value),
-        },
+        ...(designDoc.missingInformation.length > 0
+          ? [
+              {
+                key: 'missingInformation' as const,
+                label: 'Missing information',
+                multiline: true,
+                value: designDoc.missingInformation.join('\n'),
+                onChangeText: (value: string) => onListFieldChange('missingInformation', value),
+              },
+            ]
+          : []),
       ]
     : []
+  const [expandedSections, setExpandedSections] = useState<DesignDocSectionKey[]>([])
+  const [frameworkMenuOpen, setFrameworkMenuOpen] = useState(false)
+  const toggleSection = (sectionKey: DesignDocSectionKey) => {
+    setExpandedSections((current) =>
+      current.includes(sectionKey) ? current.filter((key) => key !== sectionKey) : [...current, sectionKey],
+    )
+  }
 
   if (!designDoc) {
     return (
       <View className="gap-2 rounded-lg border border-[#9db4ff]/20 bg-[#9db4ff]/10 p-4">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
+        <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Design Doc</Text>
         <Text className="text-lg font-black text-[#eef2ff]">Not generated yet</Text>
         <Text className="text-sm leading-6 text-[#eef2ff]/75">
           Start in Chat to create your first draft.
@@ -2019,7 +1984,7 @@ function DesignDocCard({
     <View className="gap-4 rounded-lg border border-[#9db4ff]/25 bg-[#1f2338] p-4">
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">MVP Design Doc</Text>
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Design Doc</Text>
           <Text className="text-2xl font-black leading-7 text-[#eef2ff]">Editable review surface</Text>
           <Text className="text-sm leading-6 text-[#eef2ff]/70">
             Review this draft, make edits, then approve it.
@@ -2036,12 +2001,14 @@ function DesignDocCard({
         <View key={section.key} onLayout={(event) => onSectionLayout(section.key, event.nativeEvent.layout.y)}>
           <EditableDocField
             approved={approvedSections.includes(section.key)}
+            expanded={expandedSections.includes(section.key)}
             label={section.label}
             multiline={section.multiline}
             value={section.value}
             onApprove={() => onApproveSection(section.key)}
             onChangeText={section.onChangeText}
             onDiscuss={() => onDiscussSection(section)}
+            onToggle={() => toggleSection(section.key)}
           />
         </View>
       ))}
@@ -2103,76 +2070,26 @@ function DesignDocCard({
 
       <View className="gap-3 rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 p-3">
         <View className="flex-row items-start justify-between gap-3">
-          <View className="min-w-0 flex-1 gap-1">
-            <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Generation submission</Text>
-            <Text className="text-sm leading-5 text-[#eef2ff]/70">
-              Send this draft to the current verification flow. A future version could use Certora's hosted prover.
-            </Text>
-          </View>
-          <View className={`rounded-full px-3 py-2 ${getGenerationStatusBadgeClass(generationJob?.status ?? 'ready')}`}>
-            <Text className="text-xs font-black text-[#dffdf4]">
-              {generationJob ? getGenerationStatusLabel(generationJob.status) : 'Ready'}
-            </Text>
-          </View>
+          <Text className="min-w-0 flex-1 text-sm font-semibold leading-5 text-[#eef2ff]/75">
+            {generationLine}
+          </Text>
         </View>
 
         {generationJob ? (
-          <View className="gap-3 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
-            <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Latest job</Text>
-            <Text className="text-sm font-semibold text-[#dffdf4]">{generationJob.summary}</Text>
-            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-              Job id: {generationJob.jobId}
-            </Text>
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Status: {getGenerationStatusLabel(generationJob.status)}
-            </Text>
-            {generationJob.currentPhase ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">Phase: {generationJob.currentPhase}</Text>
-            ) : null}
-            {generationJob.progressSummary ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">Progress: {generationJob.progressSummary}</Text>
-            ) : null}
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Updated: {formatSavedAt(generationJob.updatedAt)}
-            </Text>
-            {generationJob.lastHeartbeatAt ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">
-                Worker heartbeat: {formatSavedAt(generationJob.lastHeartbeatAt)}
-              </Text>
-            ) : null}
-            {generationJob.aiComposerThreadId ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">
-                AI Composer thread: {formatShortIdentifier(generationJob.aiComposerThreadId)}
-              </Text>
-            ) : null}
-            {generationJob.lastCheckpointId ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">
-                Latest checkpoint: {formatShortIdentifier(generationJob.lastCheckpointId)}
-              </Text>
-            ) : null}
-            {generationJob.lastMaterializedSnapshotAt ? (
-              <Text className="text-xs leading-5 text-[#dffdf4]/70">
-                Last safe snapshot: {formatSavedAt(generationJob.lastMaterializedSnapshotAt)}
-              </Text>
-            ) : null}
-            {generationJob.latestLogExcerpt ? (
-              <Text className="rounded-xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-2 text-xs leading-5 text-[#dffdf4]/72">
-                Latest status: {generationJob.latestLogExcerpt}
-              </Text>
-            ) : null}
-            {hasRenderableGenerationResult(generationJob) ? (
-              <GeneratedResultSummary
-                artifacts={generationJob.artifacts}
-                modelLabel={generationJob.modelLabel ?? null}
-                providerLabel={generationJob.providerLabel ?? null}
-                summary={generationJob.summary}
-              />
-            ) : null}
+          <View className="gap-2">
             {getGenerationResultIssue(generationJob) ? (
               <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
                 {getGenerationResultIssue(generationJob)}
               </Text>
             ) : null}
+            <Pressable
+              accessibilityLabel="Open in GitHub"
+              accessibilityRole="button"
+              disabled={true}
+              className="items-center rounded-full bg-[#eef2ff]/10 px-4 py-2"
+            >
+              <Text className="text-xs font-black text-[#eef2ff]/35">Open in GitHub</Text>
+            </Pressable>
             <Pressable
               accessibilityLabel="Refresh generation status"
               accessibilityRole="button"
@@ -2187,6 +2104,41 @@ function DesignDocCard({
           </View>
         ) : null}
 
+        <View className="gap-2 rounded-xl border border-[#eef2ff]/12 bg-[#0d1117] p-3">
+          <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Framework</Text>
+          <Pressable
+            accessibilityLabel="Choose generation framework"
+            accessibilityRole="button"
+            onPress={() => setFrameworkMenuOpen((open) => !open)}
+            className="flex-row items-center justify-between rounded-lg border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-3"
+          >
+            <Text className="text-sm font-black text-[#eef2ff]">{generationFramework}</Text>
+            <Text className="text-sm font-black text-[#c8d6ff]">{frameworkMenuOpen ? 'Close' : 'Change'}</Text>
+          </Pressable>
+          {frameworkMenuOpen ? (
+            <View className="gap-1">
+              {GENERATION_FRAMEWORK_OPTIONS.map((framework) => (
+                <Pressable
+                  key={framework}
+                  accessibilityLabel={`Select ${framework}`}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    onFrameworkChange(framework)
+                    setFrameworkMenuOpen(false)
+                  }}
+                  className={`rounded-lg px-3 py-2 ${framework === generationFramework ? 'bg-[#75e6be]/20' : 'bg-[#eef2ff]/6 active:bg-[#eef2ff]/10'}`}
+                >
+                  <Text
+                    className={`text-sm font-black ${framework === generationFramework ? 'text-[#adf7e6]' : 'text-[#eef2ff]/75'}`}
+                  >
+                    {framework}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+        </View>
+
         {generationError ? (
           <Text className="rounded-xl border border-[#ff8a5c]/30 bg-[#ff8a5c]/10 px-3 py-2 text-sm leading-5 text-[#ffd2bd]">
             {generationError}
@@ -2194,7 +2146,7 @@ function DesignDocCard({
         ) : null}
 
         <Pressable
-          accessibilityLabel="Generate MVP"
+          accessibilityLabel="Generate"
           accessibilityRole="button"
           disabled={generationBlocked}
           onPress={onGenerate}
@@ -2240,15 +2192,15 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 3',
       title: 'Waiting on properties',
-      body: 'The app is preparing the next checks. Refresh to check again.',
+      body: 'The app is preparing properties. Refresh to check again.',
       target: 'properties',
     }
   }
   if (!props.verificationPropertiesApprovedAt) {
     return {
       eyebrow: 'Step 3',
-      title: 'Approve verification properties',
-      body: 'Review these checks and approve them to continue.',
+      title: 'Approve properties to hold',
+      body: 'Approve the listed properties to continue.',
       target: 'properties',
     }
   }
@@ -2273,7 +2225,7 @@ function deriveSuggestedNextAction(props: {
     return {
       eyebrow: 'Step 6',
       title: 'AI Composer is running',
-      body: 'Generation is in progress. Refresh to check status.',
+      body: 'Generation can take hours. Return to Workspace and refresh for the latest backend status.',
       target: 'design-doc',
     }
   }
@@ -2299,17 +2251,17 @@ function deriveSuggestedNextAction(props: {
   if (!props.publishedAt) {
     return {
       eyebrow: PROGRAM_DEPLOYMENT_FLOW_ENABLED ? 'Step 8' : 'Step 7',
-      title: 'Publish to Explore',
+      title: 'Publish to Exploration',
       body: 'Share your project with the community.',
       target: 'publish',
     }
   }
   return {
     eyebrow: 'Keep going',
-    title: 'Add another invariant',
+    title: 'Add another property',
     body: PROGRAM_DEPLOYMENT_FLOW_ENABLED
-      ? 'Your project is live. Add one more check today.'
-      : 'Your project is published. Add one more check today.',
+      ? 'Your project is live. Add one more property today.'
+      : 'Your project is published. Add one more property today.',
     target: 'daily-property',
   }
 }
@@ -2393,9 +2345,9 @@ function DailyPropertyCard({
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1 gap-1">
           <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Daily challenge</Text>
-          <Text className="text-xl font-black leading-6 text-[#fff4cf]">Add one more invariant</Text>
+          <Text className="text-xl font-black leading-6 text-[#fff4cf]">Add one more property</Text>
           <Text className="text-sm leading-5 text-[#fff4cf]/70">
-            Add one more check in plain language, then discuss it in Chat.
+            Add one more property in plain language, then discuss it in Chat.
           </Text>
         </View>
         <View className="items-end gap-2">
@@ -2507,7 +2459,7 @@ function CvlrSpecCard({
         <Text className="text-xs font-black uppercase tracking-widest text-[#c8d6ff]">Formal verification specs</Text>
         <Text className="text-lg font-black text-[#fff4cf]">Waiting on property approval</Text>
         <Text className="text-sm leading-6 text-[#fff4cf]/70">
-          Approve the verification properties above before generating the specifications for formal verification.
+          Approve the properties above before generating the specifications for formal verification.
         </Text>
       </View>
     )
@@ -2544,10 +2496,7 @@ function CvlrSpecCard({
 
       {cvlrSpec ? (
         <View className="gap-2 rounded-lg border border-[#c8d6ff]/15 bg-[#0d1117] p-3">
-          <Text className="text-[10px] font-black uppercase tracking-widest text-[#c8d6ff]/55">checks.rs</Text>
-          <Text selectable className="font-mono text-xs leading-5 text-[#c8d6ff]/85" numberOfLines={12}>
-            {cvlrSpec.checksRs}
-          </Text>
+          <Text className="text-sm font-semibold text-[#c8d6ff]">Formal verification spec generated.</Text>
         </View>
       ) : null}
 
@@ -2621,7 +2570,7 @@ function PropertiesToProveCard({
   if (!designDocApprovedAt) {
     return (
       <View className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-4">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
+        <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to hold</Text>
         <Text className="text-lg font-black text-[#fff4cf]">Waiting on Design Doc approval</Text>
         <Text className="text-sm leading-6 text-[#fff4cf]/70">
           Approve the Design Doc first.
@@ -2636,11 +2585,7 @@ function PropertiesToProveCard({
     <View className="gap-4 rounded-lg border border-[#ffd978]/25 bg-[#23182c] p-4">
       <View className="flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to prove</Text>
-          <Text className="text-2xl font-black leading-7 text-[#fff4cf]">Review the properties to prove</Text>
-          <Text className="text-sm leading-6 text-[#fff4cf]/70">
-            These checks come from the approved Design Doc. Approve them to continue.
-          </Text>
+          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Properties to hold</Text>
         </View>
         <View className={`rounded-full px-3 py-2 ${approved ? 'bg-[#75e6be]/15' : 'bg-[#ffd978]/15'}`}>
           <Text className={`text-xs font-black ${approved ? 'text-[#dffdf4]' : 'text-[#ffe6a3]'}`}>
@@ -2651,10 +2596,8 @@ function PropertiesToProveCard({
 
       <View className="gap-2">
         {properties.map((property) => (
-          <View key={property.id} className="gap-2 rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
-            <Text className="text-[10px] font-black uppercase tracking-widest text-[#fff4cf]/50">{property.label}</Text>
+          <View key={property.id} className="rounded-lg border border-[#fff4cf]/15 bg-[#2d1e37] p-3">
             <Text className="text-sm font-black leading-5 text-[#fff4cf]">{property.statement}</Text>
-            <Text className="text-xs leading-5 text-[#fff4cf]/65">{property.rationale}</Text>
           </View>
         ))}
       </View>
@@ -2665,14 +2608,14 @@ function PropertiesToProveCard({
         </Text>
       ) : (
         <Pressable
-          accessibilityLabel="Approve properties to prove"
+          accessibilityLabel="Approve properties to hold"
           accessibilityRole="button"
           disabled={properties.length === 0}
           onPress={onApprove}
           className={`items-center rounded-full px-4 py-3 ${properties.length === 0 ? 'bg-[#ffd978]/35' : 'bg-[#ffd978] active:bg-[#ffe6a3]'}`}
         >
           <Text className="text-sm font-black text-[#201626]">
-            {properties.length === 0 ? 'No properties proposed yet' : 'Approve properties to prove'}
+            {properties.length === 0 ? 'No properties proposed yet' : 'Approve properties to hold'}
           </Text>
         </Pressable>
       )}
@@ -2681,7 +2624,6 @@ function PropertiesToProveCard({
 }
 
 function DeploymentCard({
-  accountAddress,
   deploymentError,
   deploymentJob,
   generationJob,
@@ -2695,7 +2637,6 @@ function DeploymentCard({
   onStart,
   walletConnected,
 }: {
-  accountAddress?: string
   deploymentError: string | null
   deploymentJob: DeploymentJobRecord | null
   generationJob: GenerationJobRecord | null
@@ -2710,13 +2651,6 @@ function DeploymentCard({
   walletConnected: boolean
 }) {
   const deployableArtifact = getDeployableGenerationArtifact(generationJob)
-  const deploymentArtifactKind = getGenerationArtifactDeploymentKind(deployableArtifact)
-  const deploymentArtifactLabel =
-    deploymentArtifactKind === 'program_binary' ? 'Program binary' : 'SBF build source'
-  const deploymentArtifactHelp =
-    deploymentArtifactKind === 'program_binary'
-      ? 'This file is ready for deployment.'
-      : 'The app will build this project before deployment.'
   const deploymentStatus = deploymentJob?.status ?? ''
   const effectiveSquadsAuthorityAddress = squadsUpgradeAuthorityAddress.trim() || deploymentJob?.authorityWallet || ''
   const blocker = getDevnetDeploymentBlocker(
@@ -2742,16 +2676,21 @@ function DeploymentCard({
   const deploymentBlocked = Boolean(blocker) || isSubmittingDeployment || hasBlockingDeploymentJob
   const deploymentFailureMessage =
     deploymentStatus === 'failed' ? deploymentJob?.errorMessage || deploymentJob?.summary || null : null
+  const deploymentLine = deploymentJob
+    ? `Devnet deployment: ${getDeploymentStatusLabel(deploymentJob.status)}.`
+    : deployableArtifact
+      ? 'Devnet deployment: binary ready.'
+      : 'Devnet deployment: build a binary first.'
   const startButtonLabel = isSubmittingDeployment
-    ? 'Estimating cost...'
+    ? 'Calculating fee...'
     : deploymentStatus === 'succeeded'
       ? 'Deployed to devnet'
-      : deploymentStatus === 'failed'
-        ? 'Retry deploy estimate'
+    : deploymentStatus === 'failed'
+        ? 'Retry fee'
       : deploymentStatus === 'authority_verification_pending'
         ? 'Verifying authority...'
         : deploymentStatus === 'deploying'
-          ? 'Backend deploying...'
+          ? 'Deploying...'
           : deploymentStatus === 'payment_confirming'
             ? 'Confirming payment...'
             : deploymentStatus === 'blocked'
@@ -2760,41 +2699,11 @@ function DeploymentCard({
                 ? 'Payment refunded'
                 : blocker
                   ? 'Deploy unavailable'
-                  : 'Estimate deploy cost'
+                  : 'Calculate fee'
 
   return (
-    <View className="gap-4 rounded-lg border border-[#75e6be]/25 bg-[#152f2d] p-4">
-      <View className="flex-row items-start justify-between gap-3">
-        <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Devnet deployment</Text>
-          <Text className="text-2xl font-black leading-7 text-[#dffdf4]">Deploy generated program</Text>
-          <Text className="text-sm leading-6 text-[#dffdf4]/70">
-            The app estimates cost first. Then your wallet approves payment and the deployment finishes in the background.
-          </Text>
-        </View>
-        <View className={`rounded-full px-3 py-2 ${getDeploymentStatusBadgeClass(deploymentJob?.status ?? 'ready')}`}>
-          <Text className="text-xs font-black text-[#dffdf4]">
-            {deploymentJob ? getDeploymentStatusLabel(deploymentJob.status) : deployableArtifact ? 'Ready' : 'Waiting'}
-          </Text>
-        </View>
-      </View>
-
-      {deployableArtifact ? (
-        <View className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">
-            {deploymentArtifactLabel}
-          </Text>
-          <Text className="text-sm font-black text-[#eef2ff]">{deployableArtifact.name}</Text>
-          <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
-            {deployableArtifact.artifactId}
-          </Text>
-          <Text className="text-xs leading-5 text-[#dffdf4]/60">{deploymentArtifactHelp}</Text>
-        </View>
-      ) : (
-        <Text className="rounded-lg border border-[#eef2ff]/12 bg-[#eef2ff]/6 px-3 py-2 text-sm leading-5 text-[#eef2ff]/70">
-          Generate a program before deployment.
-        </Text>
-      )}
+    <View className="gap-3 rounded-lg border border-[#75e6be]/25 bg-[#152f2d] p-4">
+      <Text className="text-sm font-semibold leading-5 text-[#dffdf4]/75">{deploymentLine}</Text>
 
       <View className="gap-2 rounded-lg border border-[#adf7e6]/15 bg-[#0e2424] p-3">
         <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Squads upgrade authority</Text>
@@ -2809,79 +2718,22 @@ function DeploymentCard({
           placeholderTextColor="#dffdf466"
           value={squadsUpgradeAuthorityAddress || deploymentJob?.authorityWallet || ''}
         />
-        <Text className="text-xs leading-5 text-[#dffdf4]/60">
-          The app will transfer control here when deployment finishes.
-        </Text>
       </View>
 
-      {deploymentJob ? (
-        <View className="gap-2 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployment job</Text>
-          <Text className="text-sm font-semibold text-[#dffdf4]">{deploymentJob.summary}</Text>
-          <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-            Job id: {deploymentJob.jobId}
-          </Text>
-          <Text className="text-xs leading-5 text-[#dffdf4]/70">Cluster: {deploymentJob.cluster}</Text>
-          {deploymentJob.payerWallet ? (
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Payer: {formatShortIdentifier(deploymentJob.payerWallet)}
-            </Text>
-          ) : null}
-          {deploymentJob.authorityWallet ? (
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Final authority: {formatShortIdentifier(deploymentJob.authorityWallet)}
-            </Text>
-          ) : null}
-          {deploymentJob.authorityMode === 'squads_upgrade_authority' ? (
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">
-              Squads validation: {getSquadsAuthorityValidationLabel(deploymentJob.squadsAuthorityValidationStatus)}
-            </Text>
-          ) : null}
-          {deploymentJob.upgradeAuthorityVerified ? (
-            <Text className="text-xs font-black leading-5 text-[#adf7e6]">Upgrade authority verified on devnet.</Text>
-          ) : null}
-          {deploymentJob.programId ? (
-            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-              Program id: {deploymentJob.programId}
-            </Text>
-          ) : null}
-          {deploymentJob.paymentSignature ? (
-            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-              Payment signature: {formatShortIdentifier(deploymentJob.paymentSignature)}
-            </Text>
-          ) : null}
-          {deploymentJob.refundSignature ? (
-            <Text selectable className="text-xs leading-5 text-[#dffdf4]/70">
-              Refund signature: {formatShortIdentifier(deploymentJob.refundSignature)}
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
-
       {deploymentJob?.deploymentEstimate ? (
-        <View className="gap-2 rounded-xl border border-[#dffdf4]/14 bg-[#dffdf4]/7 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Deployment prepay</Text>
+        <View className="gap-1 rounded-lg border border-[#dffdf4]/14 bg-[#dffdf4]/7 p-3">
           <Text className="text-sm font-black text-[#dffdf4]">
             Total due: {formatLamportsAsSol(deploymentJob.deploymentEstimate.totalLamports)}
           </Text>
           <Text className="text-xs leading-5 text-[#dffdf4]/70">
-            Includes rent, network fees, and service fee.
+            Rent-exempt deposit: {formatLamportsAsSol(deploymentJob.deploymentEstimate.rentLamports)} refundable when closed.
           </Text>
-          <Text className="text-xs leading-5 text-[#dffdf4]/60">
-            Expires: {deploymentJob.deploymentEstimate.estimateExpiresAt}
+          <Text className="text-xs leading-5 text-[#dffdf4]/70">
+            Network estimate: {formatLamportsAsSol(deploymentJob.deploymentEstimate.estimatedNetworkFeeLamports)}.
           </Text>
-        </View>
-      ) : null}
-
-      {deploymentJob?.paymentRequest ? (
-        <View className="gap-2 rounded-xl border border-[#ffd978]/25 bg-[#ffd978]/10 p-3">
-          <Text className="text-xs font-black uppercase tracking-widest text-[#ffd978]">Before payment</Text>
-          <Text className="text-sm font-black leading-5 text-[#fff4cf]">Approve one payment to continue deployment.</Text>
-          {deploymentJob.paymentRequest.simulationSummary ? (
-            <Text className="text-xs leading-5 text-[#fff4cf]/70">
-              Estimate: {deploymentJob.paymentRequest.simulationSummary}
-            </Text>
-          ) : null}
+          <Text className="text-xs leading-5 text-[#dffdf4]/70">
+            Service fee: {formatLamportsAsSol(deploymentJob.deploymentEstimate.serviceFeeLamports)} (1%).
+          </Text>
         </View>
       ) : null}
 
@@ -2936,75 +2788,30 @@ function DeploymentCard({
           </Pressable>
         ) : null}
       </View>
-
-      {accountAddress ? (
-        <Text className="text-xs leading-5 text-[#dffdf4]/55">
-          Connected wallet: {formatShortIdentifier(accountAddress)}
-        </Text>
-      ) : null}
-    </View>
-  )
-}
-
-function GeneratedResultSummary({
-  artifacts,
-  modelLabel,
-  providerLabel,
-  summary,
-}: {
-  artifacts: GenerationArtifactRecord[]
-  modelLabel: string | null
-  providerLabel: string | null
-  summary: string
-}) {
-  return (
-    <View className="gap-3 rounded-xl border border-[#75e6be]/20 bg-[#75e6be]/10 p-3">
-      <View className="gap-1">
-        <Text className="text-xs font-black uppercase tracking-widest text-[#adf7e6]">Generated result</Text>
-        <Text className="text-sm font-semibold text-[#dffdf4]">{summary}</Text>
-      </View>
-      {providerLabel || modelLabel ? (
-        <Text className="text-xs leading-5 text-[#dffdf4]/70">
-          {providerLabel ? `Provider: ${providerLabel}` : 'Provider: n/a'}
-          {modelLabel ? `  Model: ${modelLabel}` : ''}
-        </Text>
-      ) : null}
-      <View className="gap-2">
-        {artifacts.map((artifact) => (
-          <View key={artifact.artifactId} className="gap-1 rounded-lg border border-[#dffdf4]/12 bg-[#dffdf4]/6 p-3">
-            <View className="flex-row items-start justify-between gap-3">
-              <Text className="min-w-0 flex-1 text-sm font-black text-[#eef2ff]">{artifact.name}</Text>
-              <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">
-                {artifact.typeLabel}
-              </Text>
-            </View>
-            <Text className="text-xs leading-5 text-[#dffdf4]/70">{artifact.summary}</Text>
-            <Text selectable className="text-xs leading-5 text-[#dffdf4]/60">
-              {artifact.path}
-            </Text>
-          </View>
-        ))}
-      </View>
     </View>
   )
 }
 
 function EditableDocField({
   approved = false,
+  expanded,
   label,
   multiline = false,
   onApprove,
   onChangeText,
   onDiscuss,
+  onToggle,
   proposedText,
   value,
 }: {
   approved?: boolean
+  expanded: boolean
   label: string
   multiline?: boolean
   onApprove?: () => void
   onChangeText: (value: string) => void
   onDiscuss?: () => void
+  onToggle: () => void
   proposedText?: string | null
   value: string
 }) {
@@ -3014,7 +2821,15 @@ function EditableDocField({
   return (
     <View className="gap-2 rounded-2xl border border-[#eef2ff]/12 bg-[#eef2ff]/6 p-3">
       <View className="flex-row items-center justify-between gap-2">
-        <Text className="min-w-0 flex-1 text-xs font-black uppercase tracking-widest text-[#c8d6ff]">{label}</Text>
+        <Pressable
+          accessibilityLabel={`${expanded ? 'Collapse' : 'Expand'} ${label}`}
+          accessibilityRole="button"
+          onPress={onToggle}
+          className="min-w-0 flex-1 flex-row items-center gap-2"
+        >
+          <Text className="w-4 text-base font-black text-[#c8d6ff]">{expanded ? '-' : '+'}</Text>
+          <Text className="min-w-0 flex-1 text-xs font-black uppercase tracking-widest text-[#c8d6ff]">{label}</Text>
+        </Pressable>
         <View className="flex-row items-center gap-2">
           {onDiscuss ? (
             <Pressable
@@ -3038,22 +2853,26 @@ function EditableDocField({
           ) : null}
         </View>
       </View>
-      <TextInput
-        multiline={multiline}
-        onChangeText={onChangeText}
-        placeholder={label}
-        placeholderTextColor="rgba(238,242,255,0.35)"
-        style={{ minHeight: multiline ? 88 : 46, textAlignVertical: multiline ? 'top' : 'center' }}
-        className="rounded-xl border border-[#eef2ff]/12 bg-[#0d1117] px-4 py-3 text-sm font-semibold leading-6 text-[#eef2ff]"
-        value={value}
-      />
-      {proposedWording ? (
-        <View className="gap-2 rounded-xl border border-[#75e6be]/18 bg-[#75e6be]/8 p-3">
-          <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">Proposed wording</Text>
-          <Text className="text-xs leading-5 text-[#dffdf4]" style={{ textDecorationLine: 'underline' }}>
-            {proposedWording}
-          </Text>
-        </View>
+      {expanded ? (
+        <>
+          <TextInput
+            multiline={multiline}
+            onChangeText={onChangeText}
+            placeholder={label}
+            placeholderTextColor="rgba(238,242,255,0.35)"
+            style={{ minHeight: multiline ? 88 : 46, textAlignVertical: multiline ? 'top' : 'center' }}
+            className="rounded-xl border border-[#eef2ff]/12 bg-[#0d1117] px-4 py-3 text-sm font-semibold leading-6 text-[#eef2ff]"
+            value={value}
+          />
+          {proposedWording ? (
+            <View className="gap-2 rounded-xl border border-[#75e6be]/18 bg-[#75e6be]/8 p-3">
+              <Text className="text-[10px] font-black uppercase tracking-widest text-[#adf7e6]">Proposed wording</Text>
+              <Text className="text-xs leading-5 text-[#dffdf4]" style={{ textDecorationLine: 'underline' }}>
+                {proposedWording}
+              </Text>
+            </View>
+          ) : null}
+        </>
       ) : null}
     </View>
   )
@@ -3291,7 +3110,7 @@ function SectionTitle({ badge, title }: { badge: string; title: string }) {
 
 function BottomNav({ activeTab, onChangeTab }: { activeTab: PrimaryTab; onChangeTab: (tab: PrimaryTab) => void }) {
   const tabs: { key: PrimaryTab; label: string }[] = [
-    { key: 'explore', label: 'Explore' },
+    { key: 'explore', label: 'Exploration' },
     { key: 'chat', label: 'Chat' },
     { key: 'workspace', label: 'Workspace' },
   ]

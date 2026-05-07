@@ -1,3 +1,4 @@
+import { DEFAULT_GENERATION_FRAMEWORK } from './model'
 import type {
   ChatMessage,
   DeploymentFeeEstimate,
@@ -534,6 +535,7 @@ function normalizeProjectSnapshot(payload: BackendProjectSnapshot): ProjectSnaps
     workflowMode,
     state: {
       workflowMode,
+      generationFramework: DEFAULT_GENERATION_FRAMEWORK,
       messages,
       latestPromptSeed: deriveLatestPromptSeed(messages),
       designDoc,

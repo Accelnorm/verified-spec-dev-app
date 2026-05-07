@@ -1,7 +1,13 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 
-const { buildGenerationRequest, createInitialMvpShellState, submitPrompt, updateWorkflowMode } = require('../.tmp-test-dist/features/mvp-shell/model.js')
+const {
+  buildGenerationRequest,
+  createInitialMvpShellState,
+  submitPrompt,
+  updateGenerationFramework,
+  updateWorkflowMode,
+} = require('../.tmp-test-dist/features/mvp-shell/model.js')
 const { readGenerationJobStatus, submitGenerationJob } = require('../.tmp-test-dist/features/mvp-shell/generation.js')
 
 test('buildGenerationRequest turns the current design doc into the backend request shape', () => {
@@ -21,23 +27,24 @@ test('buildGenerationRequest turns the current design doc into the backend reque
     title: 'Chat-first mobile MVP',
     workflow_mode: 'vibe_coding',
     project_type: 'solana_mobile_app',
+    framework: 'Anchor',
     design_doc: [
       '# Chat-first mobile MVP',
       '',
       '## Goal',
-      'Deliver chat-first mobile mvp through a hackathon-ready MVP flow before generation starts.',
+      'Deliver chat-first mobile mvp before generation starts.',
       '',
       '## Core requirements',
       '- Capture the user prompt as the project seed and keep it visible during review.',
-      '- Turn chat-first mobile mvp into one editable MVP Design Doc with clear requirements.',
+      '- Turn chat-first mobile mvp into one editable Design Doc with clear requirements.',
       '- Keep the Design Doc ready for a later backend generation submission without requiring extra setup.',
       '',
       '## Assumptions',
-      '- The first generated Design Doc is a concise MVP draft that the user can refine in-app.',
+      '- The first generated Design Doc is concise and user-editable.',
       '- Generation, verification, and deployment stay outside this review step until the backend contract is available.',
       '',
       '## Missing information',
-      '- Success criteria or acceptance checks that define a finished MVP outcome.',
+      '- Success criteria or acceptance checks that define a finished outcome.',
       '- Any integration, wallet, or backend constraints that must shape generation later.',
     ].join('\n'),
   })
@@ -62,11 +69,31 @@ test('buildGenerationRequest sends Vibe mode when the project selected Vibe', ()
   assert.equal(request.workflow_mode, 'vibe_coding')
 })
 
+test('buildGenerationRequest sends the selected framework', () => {
+  const state = updateGenerationFramework(
+    submitPrompt(
+      createInitialMvpShellState(),
+      'Build a marketplace MVP.',
+      (() => {
+        const ids = ['user-1', 'app-1']
+        return () => ids.shift()
+      })(),
+      '2026-05-06T01:05:00Z'
+    ),
+    'Pinocchio'
+  )
+
+  const request = buildGenerationRequest(state)
+
+  assert.equal(request.framework, 'Pinocchio')
+})
+
 test('submitGenerationJob posts the request to the backend and returns the stable queued job response', async () => {
   const request = {
     title: 'Marketplace MVP',
     workflow_mode: 'professional_development',
     project_type: 'solana_mobile_app',
+    framework: 'Anchor',
     design_doc: '# Marketplace MVP\n\nBuild a local hackathon demo.',
   }
 
