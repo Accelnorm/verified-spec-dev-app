@@ -25,6 +25,10 @@ The full demo runs on a single Android emulator (or physical device) against a l
 1. **Chat — describe the program**
    Open the Chat tab. Type a description such as _"Build a simple on-chain attestation program"_, send and discuss. The backend drafts a Design Doc and proposes it in the Workspace tab.
 
+   <img src="docs/evidence/demo-flow/step1-chat-reset.png" alt="Step 1 evidence: clean chat state before entering the prompt" width="240" />
+
+   <img src="docs/evidence/demo-flow/step1-chat-design-doc-ready.png" alt="Step 1 evidence: chat shows the Design Doc is ready for review" width="240" />
+
 2. **Workspace — approve the Design Doc**
    Review and approve the auto-drafted Design Doc (title, goal, requirements, assumptions).
 
@@ -34,8 +38,12 @@ The full demo runs on a single Android emulator (or physical device) against a l
 4. **Workspace — generate the CVLR spec**
    Tap **Generate CVLR spec**. The backend writes `checks.rs`.
 
+   <img src="docs/evidence/demo-flow/step4-before-generate-card.png" alt="Step 4 evidence: formal verification spec generation card before starting" width="240" />
+
 5. **Workspace — approve the CVLR spec**
    Accept the spec as is or review it (marketplace for professional review to be added). Tap **Approve spec**. The backend immediately submits the design doc, properties, and CVLR spec to AI Composer for code synthesis.
+
+   <img src="docs/evidence/demo-flow/step5-spec-review.png" alt="Step 5 evidence: generated formal verification spec review surface" width="240" />
 
 6. **Workspace — let the AI Composer run**
    The Design Doc card cycles through `queued → running → succeeded`. Tap **Refresh** to poll (notifications to be added).
@@ -48,6 +56,8 @@ The full demo runs on a single Android emulator (or physical device) against a l
 
 9. **Explore tab — confirm live listing**
    Switch to Explore. The published project card and its verification properties appear.
+
+   <img src="docs/evidence/explore-published-feed-20260507/explore-published-projects.png" alt="Step 9 evidence: Explore shows published project cards from the backend feed" width="240" />
 
 ---
 
