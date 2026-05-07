@@ -131,6 +131,37 @@ export async function submitDeploymentPayment({
   return normalizeDeploymentJob(payload as BackendDeploymentJob)
 }
 
+export async function recoverDeploymentPayment({
+  backendBaseUrl,
+  job,
+}: {
+  backendBaseUrl: string
+  job: DeploymentJobRecord
+}): Promise<DeploymentJobRecord> {
+  const response = await fetch(`${backendBaseUrl.replace(/\/$/, '')}/jobs/${job.jobId}/deployment-payment/recover`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      payment_request_id: job.paymentRequest?.requestId ?? null,
+    }),
+  })
+
+  const payload = await readBackendResponsePayload(response)
+
+  if (!response.ok) {
+    throw new Error(
+      readBackendErrorMessage(payload, 'No completed devnet payment was found for this deployment yet.'),
+    )
+  }
+  if (!isBackendDeploymentJob(payload)) {
+    throw new Error('Backend returned an invalid deployment response after payment recovery.')
+  }
+
+  return normalizeDeploymentJob(payload as BackendDeploymentJob)
+}
+
 export function decodeBase64Transaction(transactionBase64: string): Transaction {
   return getTransactionDecoder().decode(decodeBase64Bytes(transactionBase64))
 }

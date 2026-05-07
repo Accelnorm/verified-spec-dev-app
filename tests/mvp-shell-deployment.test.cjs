@@ -4,6 +4,7 @@ const test = require('node:test')
 const {
   bytesToBase64,
   readDeploymentJobStatus,
+  recoverDeploymentPayment,
   submitDeploymentPayment,
   submitDevnetDeploymentJob,
 } = require('../.tmp-test-dist/features/mvp-shell/deployment.js')
@@ -171,6 +172,84 @@ test('submitDeploymentPayment returns updated deployment status', async () => {
   assert.deepEqual(response.transactionSignatures, ['txsig_1'])
   assert.equal(response.paymentSignature, 'txsig_1')
   assert.equal(response.paymentRequest, null)
+})
+
+test('recoverDeploymentPayment asks backend to find a matching finalized prepayment', async () => {
+  global.fetch = async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:8000/jobs/dep_123/deployment-payment/recover')
+    assert.deepEqual(JSON.parse(options.body), {
+      payment_request_id: 'payreq_1',
+    })
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          job_id: 'dep_123',
+          status: 'succeeded',
+          summary: 'Devnet deployment succeeded.',
+          status_url: '/jobs/dep_123',
+          created_at: '2026-05-06T02:00:00Z',
+          updated_at: '2026-05-06T02:01:00Z',
+          cluster: 'devnet',
+          source_artifact_id: 'artifact_1',
+          payer_wallet: 'wallet_abc',
+          authority_wallet: 'wallet_abc',
+          authority_mode: 'user_wallet_demo_authority',
+          program_id: 'program_abc',
+          transaction_signatures: ['pay_sig', 'deploy_sig'],
+          deployment_refs: ['devnet-payment:pay_sig', 'devnet:deploy_sig'],
+          verification_status_at_deploy: 'succeeded',
+          upgrade_authority_verified: false,
+          squads_authority_validation_status: 'not_applicable',
+          deployment_estimate: null,
+          payment_request: null,
+          payment_signature: 'pay_sig',
+          refund_signature: null,
+          signature_request: null,
+        }
+      },
+    }
+  }
+
+  const response = await recoverDeploymentPayment({
+    backendBaseUrl: 'http://127.0.0.1:8000',
+    job: {
+      jobId: 'dep_123',
+      status: 'payment_required',
+      summary: 'Wallet payment required.',
+      statusUrl: '/jobs/dep_123',
+      createdAt: '2026-05-06T02:00:00Z',
+      updatedAt: '2026-05-06T02:00:00Z',
+      cluster: 'devnet',
+      sourceArtifactId: 'artifact_1',
+      payerWallet: 'wallet_abc',
+      authorityWallet: 'wallet_abc',
+      authorityMode: 'user_wallet_demo_authority',
+      programId: null,
+      transactionSignatures: [],
+      deploymentRefs: [],
+      verificationStatusAtDeploy: 'succeeded',
+      upgradeAuthorityVerified: false,
+      squadsAuthorityValidationStatus: 'not_applicable',
+      deploymentEstimate: null,
+      paymentRequest: {
+        requestId: 'payreq_1',
+        transactionBase64: 'AQID',
+        minContextSlot: '42',
+        summary: 'Prepay artifact_1 deployment.',
+        simulationSummary: 'Total prepay: 129305250 lamports.',
+      },
+      paymentSignature: null,
+      refundSignature: null,
+      signatureRequest: null,
+    },
+  })
+
+  assert.equal(response.status, 'succeeded')
+  assert.equal(response.programId, 'program_abc')
+  assert.equal(response.paymentRequest, null)
+  assert.equal(response.paymentSignature, 'pay_sig')
 })
 
 test('readDeploymentJobStatus falls back to unavailable when the backend cannot return the job', async () => {

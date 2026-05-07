@@ -58,6 +58,7 @@ import {
   bytesToBase64,
   decodeBase64Transaction,
   readDeploymentJobStatus,
+  recoverDeploymentPayment,
   submitDeploymentPayment,
   submitDevnetDeploymentJob,
 } from '../features/mvp-shell/deployment'
@@ -865,6 +866,7 @@ export function SpecDrivenApp() {
 
     setDeploymentError(null)
     setIsSigningDeployment(true)
+    let recoverableJob: DeploymentJobRecord | null = null
 
     try {
       const authorityWallet = deploymentJob.authorityWallet?.trim() || squadsUpgradeAuthorityAddress.trim()
@@ -889,6 +891,7 @@ export function SpecDrivenApp() {
         throw new Error('Deployment payment request is not available. Refresh deployment status and try again.')
       }
       setMvpState((currentState) => saveDeploymentJob(currentState, refreshedJob))
+      recoverableJob = refreshedJob
       const transaction = decodeBase64Transaction(paymentRequest.transactionBase64)
       const minContextSlot = paymentRequest.minContextSlot ? BigInt(paymentRequest.minContextSlot) : 0n
       const signatureBytes = await signAndSendTransaction(transaction, minContextSlot)
@@ -900,6 +903,36 @@ export function SpecDrivenApp() {
 
       setMvpState((currentState) => saveDeploymentJob(currentState, updatedJob))
     } catch (error) {
+      if (recoverableJob?.paymentRequest) {
+        try {
+          const recoveredJob = await recoverDeploymentPayment({
+            backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+            job: recoverableJob,
+          })
+          setMvpState((currentState) => saveDeploymentJob(currentState, recoveredJob))
+          setDeploymentError(null)
+          return
+        } catch (recoveryError) {
+          const latestJob = await readDeploymentJobStatus({
+            backendBaseUrl: LOCAL_BACKEND_BASE_URL,
+            job: recoverableJob,
+            timeoutMs: 8000,
+          })
+          if (latestJob.status !== 'unavailable') {
+            setMvpState((currentState) => saveDeploymentJob(currentState, latestJob))
+            if (latestJob.status !== 'payment_required') {
+              setDeploymentError(null)
+              return
+            }
+          }
+          const recoveryMessage =
+            recoveryError instanceof Error
+              ? recoveryError.message
+              : 'No completed devnet payment was found for this deployment yet.'
+          setDeploymentError(`Wallet did not return a usable payment signature. ${recoveryMessage}`)
+          return
+        }
+      }
       setDeploymentError(error instanceof Error ? error.message : 'Wallet payment failed. Try again from your wallet.')
     } finally {
       setIsSigningDeployment(false)
